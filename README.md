@@ -1,2 +1,215 @@
 # motir-codegraph
-Motir's code graph service
+
+motir-codegraph is Motir's code graph service, built as a product of its own: a
+multi-tenant index of source repositories that answers questions about code
+(definitions, references, file contents) for the clients it has issued
+credentials to. Motir is one such client. The service has its own repository,
+its own Postgres database and its own logins, and it **runs with no Motir service
+present**: nothing in it needs motir-core or motir-ai to start, migrate or test.
+
+License: **GPL-3.0-only** (see [LICENSE](LICENSE)).
+
+Postgres is the service's store of record. Its schema holds **no Motir
+organisation, project or workspace id**: tenants, repositories and clients are
+the service's own UUIDs, and Motir, as a client, maps its own ids onto them.
+Tenants are kept apart by the database itself, through forced row-level
+security, not by the service remembering to filter.
+
+## Prerequisites
+
+- Node 22 or later, and pnpm (the version `packageManager` in `package.json` pins).
+- Postgres 16 or later, and `psql` 15 or later (the walk below uses `\getenv`). CI
+  runs Postgres 18; to start the same locally on port 5432:
+
+  ```sh
+  docker run --name codegraph-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:18
+  ```
+
+## Configure
+
+```sh
+cp .env.example .env
+```
+
+`.env` holds three connection URLs, all on `localhost`:
+
+| Variable             | Login             | What it is for                                                                                                                |
+| -------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_ADMIN_URL` | a superuser       | Used **only** by `pnpm db:bootstrap`, locally and in CI, to create the two logins and the database. Production never sets it. |
+| `DATABASE_URL`       | `codegraph_owner` | Owns schema `codegraph` and every table. The only login migrations run as; the tests use it too.                              |
+| `DATABASE_APP_URL`   | `codegraph_app`   | The login the service runs as. Owns nothing, cannot run DDL, and is held to one tenant per transaction by row-level security. |
+
+`db:bootstrap` sets each login's password from the password in its own URL, so
+the URLs are the only place the passwords are written.
+
+## Bring up
+
+```sh
+pnpm install --frozen-lockfile
+pnpm db:bootstrap
+pnpm db:migrate
+pnpm db:migrate
+pnpm test
+```
+
+`pnpm db:bootstrap` creates (or re-asserts) both logins and the database:
+
+```text
+bootstrapped codegraph_owner and codegraph_app; database codegraph created
+```
+
+The first `pnpm db:migrate` applies every file in [`db/migrations/`](db/migrations)
+in filename order, each in its own transaction, as `codegraph_owner`:
+
+```text
+applied 0001_tenancy.sql
+applied 0002_row_level_security.sql
+```
+
+The second applies nothing:
+
+```text
+nothing to apply (2 already applied)
+```
+
+`pnpm test` then runs the suite against the same Postgres; every test creates and
+drops a database of its own. An applied migration file is never edited: the
+runner records each file's checksum and refuses to run while an applied file's
+checksum has changed, naming the file. A change is a new file.
+
+## Watch tenant isolation
+
+With the database brought up above, this psql walk creates two tenants and a
+client granted one of them, then shows the database refusing the other. Load
+`.env` into the shell and start psql as the owner:
+
+```sh
+set -a; . ./.env; set +a
+psql "$DATABASE_URL"
+```
+
+Then paste each block. The token hashes are computed in psql with `sha256()`,
+so no real credential appears; the ids in the outputs are the ones one run
+printed and will differ in yours.
+
+**1. As `codegraph_owner`, create the first operator, then use it.**
+`codegraph_bootstrap_operator()` is the one function only the owner may call;
+every other write goes through an operator function, which refuses unless
+`app.client_id` names an operator.
+
+```sql
+\getenv app_url DATABASE_APP_URL
+\getenv owner_url DATABASE_URL
+SELECT codegraph.codegraph_bootstrap_operator('walk-operator', sha256('walk-operator-token'), 'cg_walk') AS operator_id \gset
+BEGIN;
+SELECT set_config('app.client_id', :'operator_id', true);
+SELECT codegraph.codegraph_create_tenant('Acme') AS acme \gset
+SELECT codegraph.codegraph_create_tenant('Globex') AS globex \gset
+SELECT codegraph.codegraph_register_repository(:'acme', 'acme-web') AS acme_repo \gset
+SELECT codegraph.codegraph_register_repository(:'globex', 'globex-core') AS globex_repo \gset
+SELECT codegraph.codegraph_create_client('reader', 'client') AS reader \gset
+SELECT codegraph.codegraph_issue_credential(:'reader', sha256('walk-reader-token'), 'cg_read');
+SELECT codegraph.codegraph_grant_access(:'reader', :'acme');
+COMMIT;
+```
+
+The last two calls print the new credential's id and the grant's id. Two
+tenants now exist, Acme and Globex, with one repository each, and `reader` is
+granted Acme only.
+
+**2. As `codegraph_app`, bound to Acme, see Acme's repository.** A request binds
+`app.client_id` and `app.tenant_id` with `set_config(..., true)`, which lasts
+for one transaction:
+
+```sql
+\connect :app_url
+BEGIN;
+SELECT set_config('app.client_id', :'reader', true), set_config('app.tenant_id', :'acme', true);
+SELECT display_name FROM codegraph.repositories;
+COMMIT;
+```
+
+```text
+ display_name
+--------------
+ acme-web
+(1 row)
+```
+
+**3. Bound to Globex, which `reader` is not granted, see nothing.**
+
+```sql
+BEGIN;
+SELECT set_config('app.client_id', :'reader', true), set_config('app.tenant_id', :'globex', true);
+SELECT display_name FROM codegraph.repositories;
+COMMIT;
+```
+
+```text
+ display_name
+--------------
+(0 rows)
+```
+
+**4. With nothing bound, see nothing.**
+
+```sql
+BEGIN;
+SELECT display_name FROM codegraph.repositories;
+COMMIT;
+```
+
+```text
+ display_name
+--------------
+(0 rows)
+```
+
+**5. The app login cannot switch row-level security off, or read credentials.**
+
+```sql
+ALTER TABLE codegraph.repositories DISABLE ROW LEVEL SECURITY;
+SELECT * FROM codegraph.credentials;
+```
+
+```text
+ERROR:  must be owner of table repositories
+ERROR:  permission denied for table credentials
+```
+
+Both are SQLSTATE `42501`, insufficient privilege.
+
+**6. As `codegraph_owner`, delete Acme.** Its repository and its grant go with
+it; the client stays, because a client is not owned by a tenant.
+
+```sql
+\connect :owner_url
+DELETE FROM codegraph.tenants WHERE display_name = 'Acme';
+SELECT count(*) AS acme_repositories FROM codegraph.repositories WHERE tenant_id = :'acme';
+SELECT count(*) AS acme_grants FROM codegraph.grants WHERE tenant_id = :'acme';
+SELECT name, kind FROM codegraph.clients WHERE id = :'reader';
+```
+
+```text
+DELETE 1
+ acme_repositories
+-------------------
+                 0
+(1 row)
+
+ acme_grants
+-------------
+           0
+(1 row)
+
+  name  |  kind
+--------+--------
+ reader | client
+(1 row)
+```
+
+## Where to go next
+
+Adding a table? Read [`docs/schema-contract.md`](docs/schema-contract.md): the
+rules every per-repository table follows so it is isolated, deleted and checked
+like the foundation tables.

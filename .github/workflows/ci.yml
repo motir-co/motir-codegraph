@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  pull_request:
+    # `ready_for_review` starts CI when a draft is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review]
+  # The merge queue builds the candidate merge (`gh-readonly-queue/main/...`)
+  # and waits for `CI complete` on it. A workflow without this trigger never
+  # reports there, and every queue entry times out.
+  merge_group:
+  push:
+    branches: [main]
+
+# Every job's GITHUB_TOKEN can only read the repository: no job writes back.
+permissions:
+  contents: read
+
+# A new commit on a pull request supersedes the run of the one before it. Runs
+# on `main` and merge-queue entries are never cancelled: a cancelled queue entry
+# is ejected with nothing red to explain why.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  format-lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The repository's own script: its tsconfig covers src/ AND tests/.
+      - run: pnpm typecheck
+
+  test:
+    name: Tests (Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        # Plain Postgres, the major motir-ai's CI runs, through Google's public
+        # mirror of Docker Hub (anonymous and not rate-limited per runner).
+        image: mirror.gcr.io/library/postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: codegraph
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d codegraph"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      # The service container's superuser, used ONLY by `db:bootstrap` to create
+      # the two logins; migrations and tests then connect as those logins.
+      DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      DATABASE_URL: postgresql://codegraph_owner:codegraph_owner@localhost:5432/codegraph
+      DATABASE_APP_URL: postgresql://codegraph_app:codegraph_app@localhost:5432/codegraph
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:bootstrap
+      - run: pnpm db:migrate
+      - run: pnpm test
+
+  # The ONE context a ruleset or the merge queue requires. `always()` makes it
+  # run when a need failed or was cancelled, and the step turns that into red:
+  # `always()` alone would go green over a failed need. `needs` lists every
+  # other job in this file.
+  ci-complete:
+    name: CI complete
+    if: always()
+    needs: [format-lint, typecheck, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Assert every needed job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS"
+          bad=$(jq -r 'to_entries[]
+                       | select(.value.result != "success" and .value.result != "skipped")
+                       | "\(.key)=\(.value.result)"' <<<"$NEEDS")
+          if [ -n "$bad" ]; then
+            while read -r line; do
+              echo "::error::CI incomplete: job ${line%%=*} finished as ${line#*=}"
+            done <<<"$bad"
+            exit 1
+          fi
+          echo "Every job in this workflow succeeded or was skipped."
