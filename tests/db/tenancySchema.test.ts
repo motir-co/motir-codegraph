@@ -22,7 +22,7 @@ afterAll(async () => {
   await db.drop();
 });
 
-/** Rows written as the owner, which owns every table and is not held by RLS here. */
+/** Rows written as the owner, which the owner policy admits on every forced table. */
 async function seed(owner: pg.Client) {
   const tenant = randomUUID();
   const otherTenant = randomUUID();
@@ -166,6 +166,12 @@ describe('codegraph_app, the login the service runs as', () => {
     const ids = await withClient(db.ownerUrl, seed);
     await withClient(db.appUrl, async (c) => {
       await c.query('BEGIN');
+      // Bound to the granted tenant, so row-level security (0002) admits the
+      // rows and only the table privileges are measured here.
+      await c.query(
+        "SELECT set_config('app.client_id', $1, true), set_config('app.tenant_id', $2, true)",
+        [ids.client, ids.tenant],
+      );
       expect(
         await sqlState(
           c,
