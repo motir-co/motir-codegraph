@@ -19,6 +19,9 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],
+      // The CLI entry points only read the environment and call src/db; CI's
+      // `db:bootstrap` and `db:migrate` steps run them on every pull request.
+      exclude: ['src/cli/**'],
       reporter: ['text', 'json-summary'],
     },
   },

@@ -74,7 +74,11 @@ jobs:
           --health-timeout 5s
           --health-retries 15
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/codegraph
+      # The service container's superuser, used ONLY by `db:bootstrap` to create
+      # the two logins; migrations and tests then connect as those logins.
+      DATABASE_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      DATABASE_URL: postgresql://codegraph_owner:codegraph_owner@localhost:5432/codegraph
+      DATABASE_APP_URL: postgresql://codegraph_app:codegraph_app@localhost:5432/codegraph
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -83,6 +87,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm db:bootstrap
+      - run: pnpm db:migrate
       - run: pnpm test
 
   # The ONE context a ruleset or the merge queue requires. `always()` makes it
