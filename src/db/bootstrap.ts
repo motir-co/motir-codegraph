@@ -59,8 +59,9 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapRes
     } else {
       await admin.query(`ALTER DATABASE ${database} OWNER TO ${OWNER_LOGIN}`);
     }
-    // Only the owner may create schemas in the service's database.
-    await admin.query(`REVOKE CREATE ON DATABASE ${database} FROM PUBLIC`);
+    // Only the owner may create schemas, or temporary tables and functions, in
+    // the service's database: codegraph_app runs no DDL of any kind.
+    await admin.query(`REVOKE CREATE, TEMPORARY ON DATABASE ${database} FROM PUBLIC`);
     return { database: owner.database, createdDatabase };
   } finally {
     await admin.end();

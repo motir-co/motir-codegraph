@@ -102,7 +102,10 @@ A new `SECURITY DEFINER` function:
   table with a temporary one;
 - has EXECUTE **revoked from PUBLIC**, because Postgres grants EXECUTE to PUBLIC
   by default and a definer function left that way is callable by any login;
-- has EXECUTE granted only to the login that needs it.
+- has EXECUTE granted only to the login that needs it. A function a policy
+  expression calls needs EXECUTE for `codegraph_app`, because Postgres checks it
+  against the querying role, not the table owner: `codegraph_bound_tenant()` is
+  granted to `codegraph_app` for exactly this reason.
 
 A function that writes on an operator's behalf calls
 `codegraph.codegraph_require_operator()` first, as the foundation's operator

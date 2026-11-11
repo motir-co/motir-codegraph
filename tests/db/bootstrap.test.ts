@@ -106,14 +106,19 @@ describe('db:bootstrap', () => {
     }
   });
 
-  it('leaves codegraph_app no CREATE on the database and unable to SET ROLE codegraph_owner', async () => {
+  it('leaves codegraph_app no CREATE or TEMPORARY on the database and unable to SET ROLE codegraph_owner', async () => {
     await withClient(db.appUrl, async (c) => {
-      const privilege = await c.query<{ create: boolean }>(
-        "SELECT has_database_privilege(current_database(), 'CREATE') AS create",
+      const privilege = await c.query<{ create: boolean; temporary: boolean }>(
+        `SELECT has_database_privilege(current_database(), 'CREATE') AS create,
+                has_database_privilege(current_database(), 'TEMPORARY') AS temporary`,
       );
-      expect(privilege.rows[0]?.create).toBe(false);
+      expect(privilege.rows[0]).toEqual({ create: false, temporary: false });
       await c.query('BEGIN');
       expect(await sqlState(c, 'SET ROLE codegraph_owner')).toBe(INSUFFICIENT_PRIVILEGE);
+      expect(await sqlState(c, 'CREATE TEMP TABLE scratch (x int)')).toBe(INSUFFICIENT_PRIVILEGE);
+      expect(
+        await sqlState(c, 'CREATE FUNCTION pg_temp.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$'),
+      ).toBe(INSUFFICIENT_PRIVILEGE);
       await c.query('ROLLBACK');
     });
   });
