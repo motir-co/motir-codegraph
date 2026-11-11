@@ -1,0 +1,4 @@
+allowBuilds:
+  # vitest and tsx run TypeScript through esbuild, whose install step fetches
+  # the platform binary.
+  esbuild: true
