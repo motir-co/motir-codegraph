@@ -66,10 +66,13 @@ export interface TenancyFixture {
  * operator bootstrapped as codegraph_owner, everything else through the
  * operator functions as codegraph_app.
  */
-export async function buildTenancyFixture(urls: {
-  ownerUrl: string;
-  appUrl: string;
-}): Promise<TenancyFixture> {
+export async function buildTenancyFixture(
+  urls: { ownerUrl: string; appUrl: string },
+  repositoryNames: { a: string[]; b: string[] } = {
+    a: ['acme-web', 'acme-api'],
+    b: ['globex-core', 'globex-ui', 'globex-docs'],
+  },
+): Promise<TenancyFixture> {
   const suffix = randomBytes(3).toString('hex');
   const operatorId = await withClient(urls.ownerUrl, (c) =>
     scalar(c, 'SELECT codegraph.codegraph_bootstrap_operator($1, $2, $3) AS value', [
@@ -99,12 +102,8 @@ export async function buildTenancyFixture(urls: {
           }
           return { id, name, repositories };
         };
-        const tenantA = await makeTenant(`Acme ${suffix}`, ['acme-web', 'acme-api']);
-        const tenantB = await makeTenant(`Globex ${suffix}`, [
-          'globex-core',
-          'globex-ui',
-          'globex-docs',
-        ]);
+        const tenantA = await makeTenant(`Acme ${suffix}`, repositoryNames.a);
+        const tenantB = await makeTenant(`Globex ${suffix}`, repositoryNames.b);
         const readerId = await call('codegraph.codegraph_create_client($1, $2)', [
           `reader-${suffix}`,
           'client',
