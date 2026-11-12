@@ -29,6 +29,9 @@ workspace id**, under any name: Motir is a client, and maps its own ids onto
 the service's. The catalogue test rejects a column whose name contains such a
 word.
 
+A content-addressed table (§10) is the one shape that carries `tenant_id`
+without `repository_id`.
+
 ## 3. The foreign key
 
 Reference the (tenant, repository) PAIR, never the repository id alone:
@@ -44,6 +47,9 @@ CONSTRAINT <table>_repository_fkey
 row can never name another tenant's repository, and the cascade means deleting
 a repository, or the tenant that owns it, removes the row. Index the
 foreign-key columns.
+
+A content-addressed table has no pair to reference: it cascades from
+`codegraph.tenants` instead, as §10 states.
 
 ## 4. Row-level security
 
@@ -145,7 +151,8 @@ Postgres:
   tenant's rows, and an ungranted, revoked or missing binding reads and writes
   nothing;
 - **deletion**: deleting the repository, and the tenant, removes the table's
-  rows;
+  rows. For a content-addressed table (§10) the deletion cases are the tenant
+  delete and the delete-blobs call, not the repository delete;
 - **catalogue**: the scan of schema `codegraph` finds `tenant_id`, forced
   row-level security and both policies on every table that carries a
   `tenant_id`, and no Motir id column anywhere. It fails for a tenant-owned table
@@ -162,3 +169,59 @@ time and what was read (`content_ref`). The read API epic writes those rows.
 else, so it can neither read the log back nor change or remove a row, and the
 tenant policy's WITH CHECK refuses a row for any tenant but the bound one.
 The route side of this rule is [`docs/api-contract.md`](api-contract.md) §8.
+
+## 10. Content-addressed tables
+
+Some rows belong to a file's content rather than to a repository: the bytes of
+one git blob, and what was extracted from them. Such a table is
+**content-addressed**, and it is a licensed shape of its own, not a relaxation
+of §2 or §3.
+
+- **What it is.** Its rows belong to one tenant and one file's git blob (the
+  git object id), and to no repository. The same bytes stored twice within a
+  tenant are one row, so storing them again is a no-op. A row that named a
+  repository, a path or a commit would give identical bytes two rows, which is
+  the duplication the blob model exists to prevent.
+- **What it carries.** `tenant_id`, and the blob's git object id column that
+  says which blob the row belongs to. No `repository_id`, and no column naming
+  a repository, a path or a commit. The table's own key adds whatever the table
+  is for: one row per blob for its contents, many rows per blob for its facts.
+  §2's rule that no column holds a Motir organisation, project or workspace id
+  applies unchanged.
+- **Sections 2 and 3 still stand for per-repository rows.** A table holding
+  anything that belongs to one repository keeps `repository_id` and the pair
+  foreign key. A content-addressed table is the only shape this document
+  licenses without them.
+- **No links between content-addressed rows.** No column references another
+  content-addressed row as the target of a name. A name that refers to another
+  file (a called function, an imported module, a parent class) stays
+  unresolved in the row and is joined when a query runs, so a blob's rows are
+  identical however and wherever it was stored.
+- **Removal.** A foreign key to `codegraph.tenants` on its `id`, with ON DELETE
+  CASCADE, and no repository foreign key. Deleting a tenant removes every one
+  of its rows; deleting a repository removes none of them. The rows of a
+  tenant's blobs that nothing references any more are removed by the
+  delete-blobs call, in bounded batches. A table whose rows belong to a blob
+  row may cascade from that row instead, and so from the tenant through it.
+- **Row-level security.** Exactly what §4 requires: enabled and forced, the two
+  policies §4 defines, named for the table as §4 names them (the tenant policy
+  for `codegraph_app` comparing the row's `tenant_id` to the uncorrelated
+  `codegraph_bound_tenant()` sub-select in both USING and WITH CHECK, and the
+  owner policy for `codegraph_owner`), and no policy for PUBLIC.
+- **Grants.** §5's rule unchanged: per table and per verb, the least the
+  service needs, never a default privilege. The table's own migration names
+  exactly the verbs it grants.
+- **Tests.** §8's catalogue case already applies, because the scan derives its
+  population from the `tenant_id` column: there is nothing for a migration to
+  register. The isolation and policy-shape cases apply as they do to every
+  table carrying `tenant_id`. The deletion cases that apply are the tenant
+  delete and the delete-blobs call; §8's repository-deletion case is not one of
+  them.
+- **Content reads.** §9 stands unchanged: a read of a blob's stored contents
+  still appends one `content_access_log` row naming the tenant, the repository
+  the read is attributed to, the client, the time and what was read. The blob's
+  row carries no repository id; the read of it still names one.
+- **The first instances.** The blob table, its contents table and the fact
+  table, which the per-file indexing work's first two migrations create. This
+  section settles no column type, constraint name, index or migration file
+  number for them: those belong to the migrations that create the tables.
