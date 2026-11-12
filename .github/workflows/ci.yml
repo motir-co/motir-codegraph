@@ -91,6 +91,43 @@ jobs:
       - run: pnpm db:migrate
       - run: pnpm test
 
+  # The image the deploy ships (MOTIR-11102), built on every pull request so a
+  # Dockerfile that no longer builds is red before it reaches main. Built, not
+  # pushed: no registry credential reaches a pull request.
+  image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          push: false
+          load: true
+          tags: motir-codegraph:ci
+      # The service's default command and the release's two scripts resolve
+      # inside the image, offline, as the unprivileged user.
+      - name: Check the image's commands
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect motir-codegraph:ci --format '{{json .Config.Cmd}}')" = '["node","dist/server/main.js"]'
+          docker run --rm --network none motir-codegraph:ci sh -c '
+            set -eu
+            test "$(id -un)" = node
+            test -f dist/server/main.js
+            test -f src/cli/migrate.ts
+            test -f src/cli/bootstrap-operator.ts
+            test -n "$(ls db/migrations/*.sql)"
+            test -s certs/rds-global-bundle.pem
+            pnpm --version
+          '
+
   # The ONE context a ruleset or the merge queue requires. `always()` makes it
   # run when a need failed or was cancelled, and the step turns that into red:
   # `always()` alone would go green over a failed need. `needs` lists every
@@ -98,7 +135,7 @@ jobs:
   ci-complete:
     name: CI complete
     if: always()
-    needs: [format-lint, typecheck, test]
+    needs: [format-lint, typecheck, test, image]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
