@@ -122,8 +122,9 @@ contents, and publish does not ask for any.
 In one transaction it proves that every non-tombstone path's blob is stored,
 retires the commit's current published layer if it has another one (a
 supersession time, never a delete — other commits' chains still name it),
-flips this layer to published and writes the ref head. Neither half lands
-without the other. It answers a `PublishedLayer`: `layerId`, `commitSha`,
+flips this layer to published, moves every ref head that named the retired
+layer to it, and writes the caller's ref head. A ref head therefore never names
+a retired layer. Neither half lands without the other. It answers a `PublishedLayer`: `layerId`, `commitSha`,
 `publishedAt`, `refHead` (the `RefHeadRow` written, or `null` when no ref was
 given) and `retired` (`{ layerId, supersededAt }` of the layer it retired, or
 `null`).
@@ -154,8 +155,9 @@ A job killed, refused or crashed anywhere between step 1 and the end of step 3
 leaves the repository exactly where it was:
 
 - **What the repository resolves to.** The previous published commit, throughout.
-  Only publish moves a ref head or makes a layer current, and it does both in
-  one transaction ([`src/layers/publish.ts`](../src/layers/publish.ts)). A
+  Only publish (and compaction's switch, which keeps the same map) moves a ref
+  head or makes a layer current, and each does both in one transaction
+  ([`src/layers/publish.ts`](../src/layers/publish.ts)). A
   repository resolving to an older commit than the one just pushed is a job
   that has not reached the end of step 3.
 - **What becomes of the staged layer and its pins.** It stays, with its path
@@ -340,8 +342,8 @@ Frees what nothing still reads, in two passes, in this order, each to
 exhaustion:
 
 1. **A layer** goes once it is not staged, and no live chain names it (a live
-   layer is one that is staged, or published and not retired; its own chain
-   counts), and no ref head names it. Its path rows go with it. A retired layer
+   layer is one that is staged, published and not retired, or named by a ref
+   head; its own chain counts), and no ref head names it. Its path rows go with it. A retired layer
    is therefore released only once no live chain names it.
 2. **A blob** goes once no staged or published layer path of the tenant
    references it. Release deletes it through the blob library's batch delete

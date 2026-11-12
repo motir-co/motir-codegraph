@@ -7,9 +7,10 @@
 // It needs both logins: DATABASE_URL (codegraph_owner) for the migration step
 // and the owner's reads, DATABASE_APP_URL (codegraph_app) for every library
 // call, bound to the tenant it creates. The three layer knobs come from the
-// environment through readLayerSettings(); set COMPACTION_THRESHOLD and
-// HARD_CEILING small to keep step 7 short. Each run seeds its own tenant and
-// two repositories through the operator functions, so runs never collide.
+// environment through readLayerSettings() (src/config.ts names their variables);
+// a small compaction threshold and hard ceiling keep step 7 short. Each run
+// seeds its own tenant and two repositories through the operator functions,
+// so runs never collide.
 //
 // `--through <N>` stops after step N (default 8), so a reader can look at the
 // rows a step left before a later step changes them; step 8 deletes R1.

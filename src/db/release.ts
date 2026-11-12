@@ -2,7 +2,9 @@
 //
 // A layer is RELEASABLE when it is not staged, no live layer's chain names it,
 // and no ref head names it. "Live" is a current published layer (no
-// supersession time) or a staged one. A chain begins with its own layer's id,
+// supersession time), a staged one, or any layer a ref head names: a ref head
+// on a retired layer keeps that layer's whole chain, so no state can leave a
+// releasable parent under a kept child. A chain begins with its own layer's id,
 // so a current published layer protects itself by membership, while a retired
 // one (published, with a supersession time) is protected only by the live
 // chains of the commits written over it — and is released once the last of
@@ -49,7 +51,12 @@ const RELEASABLE_LAYER_WHERE = `l.tenant_id = $1
       SELECT 1 FROM codegraph.commit_layers live
       WHERE live.tenant_id = l.tenant_id AND live.repository_id = l.repository_id
         AND live.chain @> ARRAY[l.id]
-        AND (live.state = 'staged' OR (live.state = 'published' AND live.superseded_at IS NULL)))
+        AND (live.state = 'staged'
+          OR (live.state = 'published' AND live.superseded_at IS NULL)
+          OR EXISTS (
+            SELECT 1 FROM codegraph.ref_heads lr
+            WHERE lr.tenant_id = live.tenant_id AND lr.repository_id = live.repository_id
+              AND lr.layer_id = live.id)))
     AND NOT EXISTS (
       SELECT 1 FROM codegraph.ref_heads r
       WHERE r.tenant_id = l.tenant_id AND r.repository_id = l.repository_id

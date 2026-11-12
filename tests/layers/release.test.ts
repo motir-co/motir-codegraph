@@ -151,6 +151,29 @@ describe('releaseTenant', () => {
     }
   });
 
+  it('keeps the chain under a retired layer a ref head still names, so the sweep never trips the parent key', async () => {
+    const scope = await freshScope();
+    const [hP, hX, hP2, hX2] = [sha(), sha(), sha(), sha()];
+    await seed.blobs(scope.tenantId, [hP, hX, hP2, hX2]);
+    const parent = await seed.published(scope, null, [{ path: 'a', gitBlobHash: hP }]);
+    const child = await seed.published(scope, parent, [{ path: 'b', gitBlobHash: hX }]);
+    await seed.refHead(scope, 'refs/heads/main', child);
+    // Both commits get new bases; the ref head is left on the retired child, the
+    // state a ref head on a retired layer leaves however it arose.
+    await seed.replace(scope, parent, [{ path: 'a', gitBlobHash: hP2 }]);
+    await seed.replace(scope, child, [
+      { path: 'a', gitBlobHash: hP2 },
+      { path: 'b', gitBlobHash: hX2 },
+    ]);
+
+    const report = await release(scope.tenantId);
+    expect(report.layerIds).toEqual([]);
+    expect(await release(scope.tenantId)).toMatchObject({ layerIds: [] });
+    for (const kept of [hP, hX]) {
+      expect(await seed.presence(scope.tenantId, kept)).toMatchObject({ blob: true });
+    }
+  });
+
   it('takes 1,200 candidates at 500 a batch in three transactions, each visible to another connection once it commits', async () => {
     const tenantId = await seed.freshTenant();
     await seed.bareBlobs(tenantId, 1_200);

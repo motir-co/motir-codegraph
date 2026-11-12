@@ -555,4 +555,42 @@ describe('publishLayer — readers and retirement', () => {
       );
     });
   });
+
+  it('two jobs staging one commit at once: the second publish moves the first job’s ref head too, so none names a retired layer', async () => {
+    const [h0, h1, h2] = [sha(), sha(), sha()];
+    await store(web.tenantId, [h0, h1, h2]);
+    const parent = await staged(web, [{ path: 'x', gitBlobHash: h0 }]);
+    await publishLayer(pool, request(web, parent.id, null));
+    const commitSha = sha();
+    // Both jobs stage before either publishes: a push to main with a known
+    // ancestor (a delta) and a new branch whose job knew none (a base).
+    const delta = await staged(web, [{ path: 'y', gitBlobHash: h1 }], parent.id, commitSha);
+    const base = await staged(
+      web,
+      [
+        { path: 'x', gitBlobHash: h0 },
+        { path: 'y', gitBlobHash: h1 },
+        { path: 'z', gitBlobHash: h2 },
+      ],
+      null,
+      commitSha,
+    );
+    await publishLayer(pool, request(web, delta.id));
+    await publishLayer(
+      pool,
+      request(web, delta.id, { name: 'refs/heads/side', isDefaultBranch: false }),
+    );
+    const published = await publishLayer(
+      pool,
+      request(web, base.id, { name: 'refs/heads/f', isDefaultBranch: false }),
+    );
+    expect(published.retired?.layerId).toBe(delta.id);
+    const named = (await refs(web)).filter((r) => r.commit_sha === commitSha);
+    expect(named.map((r) => [r.ref_name, r.layer_id])).toEqual([
+      ['refs/heads/f', base.id],
+      ['refs/heads/main', base.id],
+      ['refs/heads/side', base.id],
+    ]);
+    expect(named.find((r) => r.ref_name === 'refs/heads/main')?.is_default_branch).toBe(true);
+  });
 });

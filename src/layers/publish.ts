@@ -3,8 +3,9 @@
 // In ONE transaction `publishLayer` proves that every non-tombstone path of a
 // staged layer names a blob the tenant holds, refusing while one does not; then
 // retires the commit's current published layer (a supersession time, never a
-// delete: other commits' chains still name it), flips this layer to published
-// and writes the caller's ref head. Neither half lands without the other, so a
+// delete: other commits' chains still name it), flips this layer to published,
+// moves every ref head that named the retired layer onto it, and writes the
+// caller's ref head. Neither half lands without the other, so a
 // job that dies, is refused or is killed leaves the repository on its previous
 // published commit.
 //
@@ -15,6 +16,7 @@ import type pg from 'pg';
 
 import {
   LayerNotStagedError,
+  listRefHeadsNamingLayer,
   markPublished,
   markSuperseded,
   moveRefHead,
@@ -242,6 +244,19 @@ async function publishInTransaction(
       throw new LayerNotPublishableError('not_staged', layer.id);
     }
     throw error;
+  }
+  // Every ref head that named the retired layer follows the commit to its new
+  // current layer, as compaction's switch does: a ref head never names a
+  // retired layer, so a release can never find a kept chain under it.
+  if (retired !== null) {
+    for (const ref of await listRefHeadsNamingLayer(client, scope, retired.id)) {
+      await moveRefHead(client, {
+        ...scope,
+        refName: ref.refName,
+        layerId: flipped.id,
+        isDefaultBranch: ref.isDefaultBranch,
+      });
+    }
   }
   return {
     layerId: flipped.id,
