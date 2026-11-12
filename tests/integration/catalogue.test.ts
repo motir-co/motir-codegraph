@@ -133,7 +133,14 @@ describe('the catalogue', () => {
       }
     });
     expect(result.tables).toEqual(
-      expect.arrayContaining(['content_access_log', 'repositories', 'tenants']),
+      expect.arrayContaining([
+        'blob',
+        'blob_contents',
+        'blob_fact',
+        'content_access_log',
+        'repositories',
+        'tenants',
+      ]),
     );
     expect(result.findings).toEqual([]);
   });
