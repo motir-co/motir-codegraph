@@ -6,6 +6,7 @@ import { bind, commitOrRollback, releaseRequestDb } from './binding.js';
 import { handleNotFound } from './errors.js';
 import { operatorRoutes } from './operator.js';
 import { deleteRoutes } from './routes/deletes.js';
+import { statusRoutes } from './routes/status.js';
 
 export const V1_PREFIX = '/v1';
 
@@ -19,7 +20,7 @@ export interface V1Options {
 }
 
 /** The route modules every copy of the server serves. */
-export const V1_ROUTE_MODULES: readonly V1Routes[] = [operatorRoutes, deleteRoutes];
+export const V1_ROUTE_MODULES: readonly V1Routes[] = [operatorRoutes, deleteRoutes, statusRoutes];
 
 /**
  * The `/v1` plugin, registered with `prefix: '/v1'`. Every versioned route is

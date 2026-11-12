@@ -165,9 +165,11 @@ describe('two copies', () => {
     }
   });
 
-  it('src/server holds no module-level cache', async () => {
-    const files = (await readdir(SERVER_SRC)).filter((file) => file.endsWith('.ts'));
-    expect(files.length).toBeGreaterThan(0);
+  it('src/server, routes included, holds no module-level cache', async () => {
+    const files = (await readdir(SERVER_SRC, { recursive: true })).filter((file) =>
+      file.endsWith('.ts'),
+    );
+    expect(files).toContain('routes/deletes.ts');
     for (const file of files) {
       const source = await readFile(`${SERVER_SRC}${file}`, 'utf8');
       // Module scope is every line that starts in column 0.
