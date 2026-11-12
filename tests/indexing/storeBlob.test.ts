@@ -9,6 +9,7 @@ import { TREE_SITTER_PRODUCER } from '../../src/extract/types.js';
 import { languageForPath } from '../../src/indexer/registry.js';
 import {
   BINARY_SNIFF_BYTES,
+  BlobBytesMismatchError,
   classify,
   decode,
   storeBlob,
@@ -17,6 +18,7 @@ import {
 } from '../../src/indexing/storeBlob.js';
 import { BIND_TENANT_SQL } from '../../src/server/binding.js';
 import { freshDatabase, queryRows, withClient, type FreshDatabase } from '../helpers/db.js';
+import { recordQueries } from '../helpers/queryLog.js';
 import { asOperator, buildTenancyFixture, inBoundTransaction } from '../helpers/tenancy.js';
 
 // storeBlob runs as codegraph_app on a connection the test holds, exactly as a
@@ -434,4 +436,278 @@ async function waitsOnLock(c: pg.Client): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error('the second writer never waited on the first');
+}
+
+const WRITE = /^\s*(INSERT|UPDATE|DELETE)/;
+
+describe('storeBlob re-classifies a stored outcome the configuration now decides differently', () => {
+  it('promotes a refused blob that now fits to indexed, with contents, facts and the cap cleared', async () => {
+    const file = input(CLEAN);
+    expect(await storeBlob(app, file, { capBytes: 10 })).toMatchObject({ outcome: 'refused' });
+    const corrected = await storeBlob(app, file);
+    expect(corrected).toEqual<StoredBlob>({
+      outcome: 'indexed',
+      alreadyStored: true,
+      sizeBytes: CLEAN.byteLength,
+      parsedWithErrors: false,
+      lossy: false,
+      refusedCapBytes: null,
+      language: 'typescript',
+      extractorVersion: TS_VERSION ?? '',
+    });
+    const rows = await rowsOf(tenantA, file.gitBlobHash);
+    expect(rows.blob[0]).toMatchObject({ outcome: 'indexed', refused_cap_bytes: null });
+    expect(Buffer.from(rows.contents[0] ?? '', 'utf8').equals(CLEAN)).toBe(true);
+    expect(rows.facts.length).toBeGreaterThan(0);
+    for (const fact of rows.facts) {
+      expect(fact).toMatchObject({
+        language: 'typescript',
+        producer: TREE_SITTER_PRODUCER,
+        extractor_version: TS_VERSION,
+      });
+    }
+    // The same facts a first store of these bytes writes.
+    const fresh = input(CLEAN);
+    await storeBlob(app, fresh);
+    expect((await rowsOf(tenantA, fresh.gitBlobHash)).facts.length).toBe(rows.facts.length);
+  });
+
+  it('flags a promoted file whose source has a syntax error rather than failing', async () => {
+    const file = input(BROKEN, 'src/broken.ts');
+    await storeBlob(app, file, { capBytes: 10 });
+    expect(await storeBlob(app, file)).toMatchObject({
+      outcome: 'indexed',
+      parsedWithErrors: true,
+    });
+    expect((await rowsOf(tenantA, file.gitBlobHash)).facts.length).toBeGreaterThan(0);
+  });
+
+  it('re-classifies a refused blob to binary, including a NUL past the first 8,000 bytes', async () => {
+    const bytes = Buffer.alloc(BINARY_SNIFF_BYTES + 200, 0x61);
+    bytes[BINARY_SNIFF_BYTES + 100] = 0;
+    const file = input(bytes);
+    await storeBlob(app, file, { capBytes: 10 });
+    expect(await storeBlob(app, file)).toMatchObject({ outcome: 'binary', alreadyStored: true });
+    const rows = await rowsOf(tenantA, file.gitBlobHash);
+    expect(rows.blob[0]).toMatchObject({
+      outcome: 'binary',
+      size_bytes: bytes.byteLength,
+      language: null,
+      extractor_version: null,
+      parsed_with_errors: null,
+      lossy: null,
+      refused_cap_bytes: null,
+    });
+    expect([rows.contents, rows.facts]).toEqual([[], []]);
+  });
+
+  it('re-classifies a refused blob to unsupported, byte-exact, recording a known language', async () => {
+    const bytes = Buffer.from('struct Point { let x: Int }\n', 'utf8');
+    const known = input(bytes, 'Sources/Point.swift');
+    const unknown = input(bytes, 'notes/point.unknownext');
+    for (const file of [known, unknown]) {
+      await storeBlob(app, file, { capBytes: 4 });
+      await storeBlob(app, file);
+    }
+    const k = await rowsOf(tenantA, known.gitBlobHash);
+    const u = await rowsOf(tenantA, unknown.gitBlobHash);
+    expect(k.blob[0]).toMatchObject({ outcome: 'unsupported', language: 'swift', lossy: false });
+    expect(u.blob[0]).toMatchObject({ outcome: 'unsupported', language: null });
+    for (const rows of [k, u]) {
+      expect(rows.facts).toEqual([]);
+      expect(Buffer.from(rows.contents[0] ?? '', 'utf8').equals(bytes)).toBe(true);
+    }
+  });
+
+  it('leaves a refused blob still over the cap exactly as it is', async () => {
+    const file = input(Buffer.alloc(64, 0x61));
+    await storeBlob(app, file, { capBytes: 10 });
+    const before = await rowsOf(tenantA, file.gitBlobHash);
+    const rec = recording(app);
+    expect(await storeBlob(rec.client, file, { capBytes: 20 })).toMatchObject({
+      outcome: 'refused',
+      refusedCapBytes: 10,
+      alreadyStored: true,
+    });
+    expect(rec.statements.filter((sql) => WRITE.test(sql))).toEqual([]);
+    expect(await rowsOf(tenantA, file.gitBlobHash)).toEqual(before);
+  });
+
+  it('promotes an unsupported blob with no language once its path resolves to an entry', async () => {
+    const gitBlobHash = hash();
+    for (const tenantId of [tenantA, tenantB]) {
+      await storeBlob(app, { ...input(CLEAN, 'README.unknownext', tenantId), gitBlobHash });
+    }
+    const otherBefore = await rowsOf(tenantB, gitBlobHash);
+    const corrected = await storeBlob(app, { ...input(CLEAN, 'src/repo.ts'), gitBlobHash });
+    expect(corrected).toMatchObject({
+      outcome: 'indexed',
+      alreadyStored: true,
+      language: 'typescript',
+    });
+    const rows = await rowsOf(tenantA, gitBlobHash);
+    expect(rows.facts.length).toBeGreaterThan(0);
+    expect(Buffer.from(rows.contents[0] ?? '', 'utf8').equals(CLEAN)).toBe(true);
+    // The other tenant's copy of the same hash is untouched.
+    expect(await rowsOf(tenantB, gitBlobHash)).toEqual(otherBefore);
+    expect(otherBefore.blob[0]).toMatchObject({ outcome: 'unsupported', language: null });
+  });
+
+  it('records the language of an unsupported blob whose path the registry now knows without a grammar', async () => {
+    const bytes = Buffer.from('func f() {}\n');
+    const file = input(bytes, 'f.unknownext');
+    await storeBlob(app, file);
+    expect(await storeBlob(app, { ...file, path: 'Sources/f.swift' })).toMatchObject({
+      outcome: 'unsupported',
+      language: 'swift',
+    });
+    const rows = await rowsOf(tenantA, file.gitBlobHash);
+    expect(rows.facts).toEqual([]);
+    expect(Buffer.from(rows.contents[0] ?? '', 'utf8').equals(bytes)).toBe(true);
+    // An unclaimed path still is: nothing changes.
+    expect(await storeBlob(app, { ...input(bytes, 'g.unknownext') })).toMatchObject({
+      language: null,
+    });
+  });
+
+  it('leaves an unsupported blob that records a language to the sweep', async () => {
+    const file = input(Buffer.from('let a = 1\n'), 'Sources/a.swift');
+    await storeBlob(app, file);
+    const before = await rowsOf(tenantA, file.gitBlobHash);
+    const rec = recording(app);
+    expect(await storeBlob(rec.client, { ...file, path: 'src/a.ts' })).toMatchObject({
+      outcome: 'unsupported',
+      language: 'swift',
+    });
+    expect(rec.statements.filter((sql) => WRITE.test(sql))).toEqual([]);
+    expect(await rowsOf(tenantA, file.gitBlobHash)).toEqual(before);
+  });
+
+  it('never demotes an unsupported blob over a lowered cap to refused', async () => {
+    const file = input(Buffer.alloc(40, 0x61), 'x.unknownext');
+    await storeBlob(app, file);
+    const before = await rowsOf(tenantA, file.gitBlobHash);
+    expect(await storeBlob(app, { ...file, path: 'x.ts' }, { capBytes: 8 })).toMatchObject({
+      outcome: 'unsupported',
+    });
+    expect(await rowsOf(tenantA, file.gitBlobHash)).toEqual(before);
+  });
+
+  it('writes nothing re-storing an indexed or a binary blob, on a pool wrapped by recordQueries', async () => {
+    const indexed = input(CLEAN);
+    const binary = input(Buffer.from('a\0b'));
+    await storeBlob(app, indexed);
+    await storeBlob(app, binary);
+    const pool = new pg.Pool({ connectionString: db.appUrl, max: 1 });
+    const log = recordQueries(pool);
+    const client = await pool.connect();
+    try {
+      for (const file of [indexed, binary]) {
+        const before = await rowsOf(tenantA, file.gitBlobHash);
+        expect((await storeBlob(client, file)).alreadyStored).toBe(true);
+        expect(await rowsOf(tenantA, file.gitBlobHash)).toEqual(before);
+      }
+    } finally {
+      client.release();
+      await pool.end();
+    }
+    expect(log.texts().filter((sql) => WRITE.test(sql))).toEqual([]);
+    expect(log.texts().filter((sql) => sql === 'BEGIN')).toHaveLength(2);
+  });
+
+  it('raises BlobBytesMismatchError naming both sizes and writes nothing', async () => {
+    const file = input(Buffer.alloc(30, 0x61));
+    await storeBlob(app, file, { capBytes: 10 });
+    const before = await rowsOf(tenantA, file.gitBlobHash);
+    const error = await storeBlob(app, { ...file, bytes: Buffer.alloc(31, 0x61) }).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(BlobBytesMismatchError);
+    expect(error).toMatchObject({ recordedSizeBytes: 30, presentedSizeBytes: 31 });
+    expect((error as Error).message).toMatch(/30.*31/);
+    expect(await rowsOf(tenantA, file.gitBlobHash)).toEqual(before);
+  });
+
+  it('settles two overlapping corrections of one refused blob on one copy and one fact set', async () => {
+    const file = input(CLEAN);
+    await storeBlob(app, file, { capBytes: 10 });
+    const one = new pg.Client({ connectionString: db.appUrl });
+    const two = new pg.Client({ connectionString: db.appUrl });
+    await one.connect();
+    await two.connect();
+    try {
+      // The first correction is held just before its COMMIT, so the second
+      // provably runs while the first transaction is still open.
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reachedCommit: () => void = () => undefined;
+      const atCommit = new Promise<void>((resolve) => {
+        reachedCommit = resolve;
+      });
+      const held = {
+        query(sql: string, params?: unknown[]) {
+          if (sql === 'COMMIT') {
+            reachedCommit();
+            return gate.then(() => one.query(sql));
+          }
+          return one.query(sql, params);
+        },
+      } as unknown as pg.ClientBase;
+      const first = storeBlob(held, file);
+      await atCommit;
+      const second = storeBlob(two, file);
+      const overlapped = await waitedOnLock(two);
+      release();
+      const answers = await Promise.all([first, second]);
+      expect(overlapped).toBe(true);
+      expect(answers.map((a) => [a.outcome, a.alreadyStored])).toEqual([
+        ['indexed', true],
+        ['indexed', true],
+      ]);
+    } finally {
+      await one.end();
+      await two.end();
+    }
+    const rows = await rowsOf(tenantA, file.gitBlobHash);
+    const fresh = input(CLEAN);
+    await storeBlob(app, fresh);
+    const single = (await rowsOf(tenantA, fresh.gitBlobHash)).facts.length;
+    expect([rows.blob.length, rows.contents.length, rows.facts.length]).toEqual([1, 1, single]);
+  });
+
+  it('writes nothing on a further call after a correction', async () => {
+    const file = input(CLEAN);
+    await storeBlob(app, file, { capBytes: 10 });
+    const corrected = await storeBlob(app, file);
+    const before = await rowsOf(tenantA, file.gitBlobHash);
+    const rec = recording(app);
+    expect(await storeBlob(rec.client, file)).toEqual(corrected);
+    expect(rec.statements.filter((sql) => WRITE.test(sql))).toEqual([]);
+    expect(await rowsOf(tenantA, file.gitBlobHash)).toEqual(before);
+  });
+
+  it('lands the whole correction in one transaction: a failed fact write leaves the row refused', async () => {
+    const file = input(CLEAN);
+    await storeBlob(app, file, { capBytes: 10 });
+    const failing = recording(app, (sql) => sql.startsWith('INSERT INTO codegraph.blob_fact'));
+    await expect(storeBlob(failing.client, file)).rejects.toThrow('forced failure');
+    const rows = await rowsOf(tenantA, file.gitBlobHash);
+    expect(rows.blob[0]).toMatchObject({ outcome: 'refused', refused_cap_bytes: 10 });
+    expect([rows.contents, rows.facts]).toEqual([[], []]);
+  });
+});
+
+/** Polls until `c`'s backend waits on a lock, up to five seconds; answers whether it did. */
+async function waitedOnLock(c: pg.Client): Promise<boolean> {
+  const pid = (c as unknown as { processID: number }).processID;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const rows = await queryRows(owner, 'SELECT 1 FROM pg_locks WHERE pid = $1 AND NOT granted', [
+      pid,
+    ]);
+    if (rows.length > 0) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
 }

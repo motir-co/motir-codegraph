@@ -15,13 +15,15 @@ import {
   getBlob,
   insertBlobIfAbsent,
   insertContents,
+  insertContentsIfAbsent,
+  setBlobClassification,
   type BlobOutcome,
   type BlobRow,
   type NewBlob,
 } from '../db/blobs.js';
-import { insertFacts } from '../db/facts.js';
+import { insertFacts, replaceFactsForBlob } from '../db/facts.js';
 import { extract } from '../extract/extract.js';
-import type { Fact } from '../extract/types.js';
+import { TREE_SITTER_PRODUCER, type Fact } from '../extract/types.js';
 import { languageForPath, unavailableLanguageForPath } from '../indexer/registry.js';
 import { BIND_TENANT_SQL } from '../server/binding.js';
 
@@ -58,6 +60,23 @@ export interface StoreBlobOptions {
 
 /** Git's binary heuristic looks this far into a file for a NUL. */
 export const BINARY_SNIFF_BYTES = 8_000;
+
+/** The bytes presented for a stored blob are not that blob's: their length differs from its recorded size. */
+export class BlobBytesMismatchError extends Error {
+  readonly gitBlobHash: string;
+  readonly recordedSizeBytes: number;
+  readonly presentedSizeBytes: number;
+
+  constructor(gitBlobHash: string, recordedSizeBytes: number, presentedSizeBytes: number) {
+    super(
+      `Blob ${gitBlobHash} is recorded at ${String(recordedSizeBytes)} bytes but ${String(presentedSizeBytes)} were presented; nothing was written.`,
+    );
+    this.name = 'BlobBytesMismatchError';
+    this.gitBlobHash = gitBlobHash;
+    this.recordedSizeBytes = recordedSizeBytes;
+    this.presentedSizeBytes = presentedSizeBytes;
+  }
+}
 
 /** What classification decided, before anything is decoded. */
 type Classification =
@@ -101,12 +120,27 @@ export function decode(bytes: Uint8Array): Decoded {
   return { text, lossy };
 }
 
-/** What a first store writes beyond the blob row. */
-interface Planned {
-  readonly blob: NewBlob;
-  readonly contents: string | null;
-  readonly facts: readonly Fact[];
-}
+/** What the ordered rule decided for one file, with everything its outcome writes. */
+type Planned =
+  | { readonly outcome: 'refused'; readonly blob: NewBlob }
+  | { readonly outcome: 'binary'; readonly blob: NewBlob }
+  | {
+      readonly outcome: 'unsupported';
+      readonly blob: NewBlob;
+      readonly contents: string;
+      readonly lossy: boolean;
+      readonly language: string | null;
+    }
+  | {
+      readonly outcome: 'indexed';
+      readonly blob: NewBlob;
+      readonly contents: string;
+      readonly lossy: boolean;
+      readonly language: string;
+      readonly extractorVersion: string;
+      readonly parsedWithErrors: boolean;
+      readonly facts: readonly Fact[];
+    };
 
 function plan(input: StoreBlobInput, capBytes: number): Planned {
   const key = {
@@ -117,40 +151,38 @@ function plan(input: StoreBlobInput, capBytes: number): Planned {
   const classification = classify(input.bytes, capBytes);
   if (classification.outcome === 'refused') {
     return {
+      outcome: 'refused',
       blob: { ...key, outcome: 'refused', refusedCapBytes: classification.capBytes },
-      contents: null,
-      facts: [],
     };
   }
   if (classification.outcome === 'binary') {
-    return { blob: { ...key, outcome: 'binary' }, contents: null, facts: [] };
+    return { outcome: 'binary', blob: { ...key, outcome: 'binary' } };
   }
   const { text, lossy } = decode(input.bytes);
   const entry = languageForPath(input.path);
   if (entry === null) {
+    const language = unavailableLanguageForPath(input.path);
     return {
-      blob: {
-        ...key,
-        outcome: 'unsupported',
-        lossy,
-        language: unavailableLanguageForPath(input.path),
-      },
+      outcome: 'unsupported',
+      blob: { ...key, outcome: 'unsupported', lossy, language },
       contents: text,
-      facts: [],
+      lossy,
+      language,
     };
   }
-  const extraction = extract(entry, text);
+  const { facts, parsedWithErrors } = extract(entry, text);
+  const stamp = {
+    lossy,
+    parsedWithErrors,
+    language: entry.language,
+    extractorVersion: entry.extractorVersion,
+  };
   return {
-    blob: {
-      ...key,
-      outcome: 'indexed',
-      lossy,
-      parsedWithErrors: extraction.parsedWithErrors,
-      language: entry.language,
-      extractorVersion: entry.extractorVersion,
-    },
+    outcome: 'indexed',
+    blob: { ...key, outcome: 'indexed', ...stamp },
     contents: text,
-    facts: extraction.facts,
+    facts,
+    ...stamp,
   };
 }
 
@@ -168,12 +200,116 @@ function answer(row: BlobRow, alreadyStored: boolean): StoredBlob {
 }
 
 /**
+ * The already-stored path's one correction: a stored outcome the configuration
+ * in force would now decide differently, rebuilt from the bytes in hand. Only
+ * two rows qualify (each other stale row has its own writer, or none):
+ *
+ * - `refused`, and its size now fits the cap: re-classified by the same ordered
+ *   rule a first store applies, to binary, unsupported or indexed;
+ * - `unsupported` with no language recorded, whose path now resolves: to
+ *   indexed when the registry can extract it, or to unsupported with the
+ *   language recorded when it knows the language but has no grammar — which
+ *   puts the row within that language's re-extraction sweep.
+ *
+ * It never writes `refused` (an unsupported row over a lowered cap stays as it
+ * is). An `unsupported` row that records a language is the sweep's, and an
+ * `indexed` or `binary` row nobody's here. Answers the corrected row, or null
+ * when the row stands.
+ */
+async function correct(
+  db: pg.ClientBase,
+  input: StoreBlobInput,
+  stored: BlobRow,
+  capBytes: number,
+): Promise<BlobRow | null> {
+  const fits = stored.sizeBytes <= capBytes;
+  if (stored.outcome === 'refused' && fits) {
+    return await promoteRefused(db, input, capBytes);
+  }
+  if (stored.outcome === 'unsupported' && stored.language === null && fits) {
+    return await resolveUnsupported(db, input, stored);
+  }
+  return null;
+}
+
+async function promoteRefused(
+  db: pg.ClientBase,
+  input: StoreBlobInput,
+  capBytes: number,
+): Promise<BlobRow | null> {
+  const planned = plan(input, capBytes);
+  const key = { tenantId: input.tenantId, gitBlobHash: input.gitBlobHash };
+  if (planned.outcome === 'refused' || planned.outcome === 'binary') {
+    // Only binary is reachable: the caller checked the size fits the cap.
+    return await setBlobClassification(db, key.tenantId, key.gitBlobHash, {
+      outcome: 'binary',
+      language: null,
+      lossy: null,
+      refusedCapBytes: null,
+    });
+  }
+  // The contents insert is where two workers correcting one blob meet: the
+  // second waits for the first to end, then writes nothing, and answers the
+  // row as the first one left it rather than writing over it.
+  if (!(await insertContentsIfAbsent(db, { ...key, contents: planned.contents }))) {
+    return await getBlob(db, key.tenantId, key.gitBlobHash);
+  }
+  // Unsupported first: the outcome check admits no refused cap beside an
+  // indexed outcome and no indexed row without a version, so an indexed result
+  // passes through unsupported inside this transaction and never leaves it so.
+  const unsupported = await setBlobClassification(db, key.tenantId, key.gitBlobHash, {
+    outcome: 'unsupported',
+    language: planned.language,
+    lossy: planned.lossy,
+    refusedCapBytes: null,
+  });
+  if (planned.outcome === 'unsupported') return unsupported;
+  return await promoteToIndexed(db, input, planned);
+}
+
+async function resolveUnsupported(
+  db: pg.ClientBase,
+  input: StoreBlobInput,
+  stored: BlobRow,
+): Promise<BlobRow | null> {
+  const planned = plan(input, Number.POSITIVE_INFINITY);
+  if (planned.outcome === 'indexed') return await promoteToIndexed(db, input, planned);
+  // A stored unsupported row's bytes hold no NUL, so the rule answers unsupported here.
+  if (planned.outcome !== 'unsupported' || planned.language === null) return null;
+  return await setBlobClassification(db, input.tenantId, input.gitBlobHash, {
+    outcome: 'unsupported',
+    language: planned.language,
+    lossy: stored.lossy,
+    refusedCapBytes: null,
+  });
+}
+
+/** Replaces the tree-sitter facts and moves the row to indexed in one locked move. */
+async function promoteToIndexed(
+  db: pg.ClientBase,
+  input: StoreBlobInput,
+  planned: Extract<Planned, { outcome: 'indexed' }>,
+): Promise<BlobRow | null> {
+  const key = { tenantId: input.tenantId, gitBlobHash: input.gitBlobHash };
+  await replaceFactsForBlob(db, key, TREE_SITTER_PRODUCER, planned.facts, {
+    extractorVersion: planned.extractorVersion,
+    parsedWithErrors: planned.parsedWithErrors,
+    language: planned.language,
+    outcome: 'indexed',
+  });
+  return await getBlob(db, key.tenantId, key.gitBlobHash);
+}
+
+/**
  * Stores one file for one tenant, once, and answers its outcome.
  *
  * Opens a transaction on `db` (BEGIN … COMMIT, ROLLBACK on any failure, which
  * is then raised), binds the tenant and client with `BIND_TENANT_SQL`, and
- * reads the blob row: a blob already stored answers the outcome on record and
- * writes nothing. Otherwise it classifies, decodes and extracts, and
+ * reads the blob row. A blob already stored answers the outcome on record and
+ * writes nothing — unless the configuration in force would now decide it
+ * differently in the one way only these bytes can fix (see `correct`), when it
+ * is corrected in this same transaction; bytes whose length is not the row's
+ * recorded size raise `BlobBytesMismatchError` first. Otherwise it classifies, decodes and extracts, and
  * `insertBlobIfAbsent` decides: only a create writes contents and facts, so a
  * worker that lost a race to the same blob writes neither and answers the
  * winner's outcome. The caller keeps the connection; it must be at READ
@@ -190,17 +326,23 @@ export async function storeBlob(
     await db.query(BIND_TENANT_SQL, [input.clientId, input.tenantId]);
     const existing = await getBlob(db, input.tenantId, input.gitBlobHash);
     if (existing !== null) {
+      if (existing.sizeBytes !== input.bytes.byteLength) {
+        throw new BlobBytesMismatchError(
+          input.gitBlobHash,
+          existing.sizeBytes,
+          input.bytes.byteLength,
+        );
+      }
+      const corrected = await correct(db, input, existing, capBytes);
       await db.query('COMMIT');
-      return answer(existing, true);
+      return answer(corrected ?? existing, true);
     }
     const planned = plan(input, capBytes);
     const { created, blob } = await insertBlobIfAbsent(db, planned.blob);
-    if (created) {
+    if (created && (planned.outcome === 'unsupported' || planned.outcome === 'indexed')) {
       const key = { tenantId: input.tenantId, gitBlobHash: input.gitBlobHash };
-      if (planned.contents !== null) {
-        await insertContents(db, { ...key, contents: planned.contents });
-      }
-      await insertFacts(db, key, planned.facts);
+      await insertContents(db, { ...key, contents: planned.contents });
+      if (planned.outcome === 'indexed') await insertFacts(db, key, planned.facts);
     }
     await db.query('COMMIT');
     return answer(blob, !created);
