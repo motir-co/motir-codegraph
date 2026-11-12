@@ -173,6 +173,12 @@ describe('codegraph_app, the login the service runs as', () => {
       { table: 'blob', column: 'outcome' },
       { table: 'blob', column: 'parsed_with_errors' },
       { table: 'blob', column: 'refused_cap_bytes' },
+      { table: 'commit_layers', column: 'published_at' },
+      { table: 'commit_layers', column: 'state' },
+      { table: 'commit_layers', column: 'superseded_at' },
+      { table: 'ref_heads', column: 'commit_sha' },
+      { table: 'ref_heads', column: 'is_default_branch' },
+      { table: 'ref_heads', column: 'layer_id' },
       { table: 'repositories', column: 'display_name' },
       { table: 'tenants', column: 'display_name' },
     ]);

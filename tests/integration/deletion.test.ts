@@ -77,8 +77,11 @@ describe('deleting a tenant', () => {
         'blob',
         'blob_contents',
         'blob_fact',
+        'commit_layers',
         'content_access_log',
         'grants',
+        'layer_paths',
+        'ref_heads',
         'repositories',
       ]);
       expect(Object.values(left).every((n) => n === 0)).toBe(true);
