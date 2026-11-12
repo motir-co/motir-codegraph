@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import type pg from 'pg';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { queryRows, withClient } from '../helpers/db.js';
+import { rowsReferencing, snapshot } from '../helpers/rows.js';
 import { inBoundTransaction } from '../helpers/tenancy.js';
 import { foundation, type Foundation } from './foundation.fixture.js';
 
@@ -46,45 +46,6 @@ beforeEach(async () => {
 afterEach(async () => {
   await f.db.drop();
 });
-
-/** Every row of every table in schema codegraph whose columns hold `value`. */
-async function rowsReferencing(c: pg.Client, column: string, value: string) {
-  const tables = await queryRows<{ table_name: string }>(
-    c,
-    `SELECT table_name FROM information_schema.columns
-      WHERE table_schema = 'codegraph' AND column_name = $1 ORDER BY 1`,
-    [column],
-  );
-  const found: Record<string, number> = {};
-  for (const { table_name } of tables) {
-    const rows = await queryRows<{ n: string }>(
-      c,
-      `SELECT count(*) AS n FROM codegraph.${c.escapeIdentifier(table_name)} WHERE ${c.escapeIdentifier(column)} = $1`,
-      [value],
-    );
-    found[table_name] = Number(rows[0]?.n);
-  }
-  return found;
-}
-
-async function snapshot(c: pg.Client, tenantId: string) {
-  return {
-    tenants: await queryRows(c, 'SELECT * FROM codegraph.tenants WHERE id = $1', [tenantId]),
-    repositories: await queryRows(
-      c,
-      'SELECT * FROM codegraph.repositories WHERE tenant_id = $1 ORDER BY id',
-      [tenantId],
-    ),
-    log: await queryRows(
-      c,
-      'SELECT * FROM codegraph.content_access_log WHERE tenant_id = $1 ORDER BY id',
-      [tenantId],
-    ),
-    grants: await queryRows(c, 'SELECT * FROM codegraph.grants WHERE tenant_id = $1 ORDER BY id', [
-      tenantId,
-    ]),
-  };
-}
 
 describe('deleting a repository', () => {
   it('leaves no row referencing its (tenant, repository) pair, and keeps its sibling', async () => {

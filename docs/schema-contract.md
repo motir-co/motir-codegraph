@@ -5,7 +5,8 @@ tables (blobs, commit layers, file contents, the queue), the read API's tables,
 and the SCIP tables. The foundation tables in
 [`db/migrations/0001_tenancy.sql`](../db/migrations/0001_tenancy.sql) and
 [`0002_row_level_security.sql`](../db/migrations/0002_row_level_security.sql)
-already follow them; copy their shape.
+already follow them; copy their shape. The rules for the routes that read and
+write these tables are in [`docs/api-contract.md`](api-contract.md).
 
 ## 1. Why the contract exists
 
@@ -111,6 +112,22 @@ A function that writes on an operator's behalf calls
 `codegraph.codegraph_require_operator()` first, as the foundation's operator
 functions do.
 
+`codegraph_app` holds no privilege on `clients` or `credentials`. The one read
+of them open to it is `codegraph.codegraph_get_client(id)` (migration
+0003), an operator-only definer function that returns the client and each of
+its credentials' id, display prefix and times. It returns **no token and no
+token hash**: a token is shown once, in the answer that issues it, and the
+database never holds it in readable form.
+
+Migration 0004 adds the delete routes' functions. An operator deletes a tenant
+or a repository through `codegraph.codegraph_delete_tenant_as_operator(tenant_id)`
+and `codegraph.codegraph_delete_repository_as_operator(tenant_id, repository_id)`,
+both operator-only, because the tenant policy admits no row of a tenant the
+bound client holds no grant on. A client deletes as `codegraph_app` under that
+policy instead. `codegraph.codegraph_tenant_exists(tenant_id)` returns only
+whether the tenant exists; the two delete routes use it so a retried delete of
+a tenant that is gone answers 404 rather than 403.
+
 ## 7. Migrations
 
 A schema change is one new plain-SQL file under [`db/migrations/`](../db/migrations),
@@ -144,3 +161,4 @@ time and what was read (`content_ref`). The read API epic writes those rows.
 `codegraph_app` may only **append** to that table: it holds INSERT and nothing
 else, so it can neither read the log back nor change or remove a row, and the
 tenant policy's WITH CHECK refuses a row for any tenant but the bound one.
+The route side of this rule is [`docs/api-contract.md`](api-contract.md) §8.

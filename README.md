@@ -64,12 +64,14 @@ in filename order, each in its own transaction, as `codegraph_owner`:
 ```text
 applied 0001_tenancy.sql
 applied 0002_row_level_security.sql
+applied 0003_operator_client_read.sql
+applied 0004_delete_functions.sql
 ```
 
 The second applies nothing:
 
 ```text
-nothing to apply (2 already applied)
+nothing to apply (4 already applied)
 ```
 
 `pnpm test` then runs the suite against the same Postgres; every test creates and
@@ -208,8 +210,187 @@ DELETE 1
 (1 row)
 ```
 
+## Run the server
+
+The HTTP server is the only way into the service: every route sits under `/v1`,
+except `GET /health`, which the load balancer calls and needs no credential.
+The server connects as `codegraph_app` (`DATABASE_APP_URL`) and keeps no state
+between requests, so any number of copies can run against one database.
+
+With the database brought up above (Postgres running, `pnpm db:bootstrap` and
+`pnpm db:migrate` done), start it:
+
+```sh
+pnpm serve
+```
+
+It listens on `PORT` (8080 in `.env.example`, and when `PORT` is unset). In
+another shell:
+
+```sh
+curl -i http://localhost:8080/health
+```
+
+```text
+HTTP/1.1 200 OK
+cache-control: no-store
+content-type: application/json; charset=utf-8
+
+{"status":"ok","process":{"up":true,"uptimeSeconds":4},"database":{"up":true}}
+```
+
+When the database cannot be reached, the same call answers `503` with
+`"status":"unavailable"` and `"database":{"up":false}` within a few seconds.
+Every error the server answers carries one body,
+`{"error":{"code":"…","message":"…"}}`; an unknown path answers `404`
+`route_not_found`.
+
+`pnpm build` compiles the server to `dist/`, and `pnpm start` runs the compiled
+`dist/server/main.js`. `SIGTERM` or `SIGINT` closes the listener, letting
+in-flight requests finish, and then the database pool.
+
+## Bootstrap an operator
+
+Every `/v1` call needs a credential the service issued, and only an operator
+can issue one, so the first operator is made by a command run with the owner
+login (`DATABASE_URL`) rather than through the API:
+
+```sh
+pnpm operator:bootstrap
+```
+
+It prints the new operator's token, once, on stdout (a line on stderr names the
+client and the token's display prefix). Only the token's SHA-256 is stored, so
+it cannot be shown again: keep it. The command refuses, prints no token and
+exits 1 once any operator exists; later operators are created with
+`POST /v1/operator/clients` and `"kind": "operator"`.
+
+With the server running (`pnpm serve`), use the token for an operator call:
+
+```sh
+export OPERATOR_TOKEN=<the printed token>
+curl -s -X POST http://localhost:8080/v1/operator/tenants \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"displayName":"Acme"}'
+```
+
+```text
+{"tenantId":"6f1c2c0e-3a4b-4f7d-9c55-0b8f2f0e7a11"}
+```
+
+## Try the API
+
+The whole journey a client and an operator take, on this machine, with no
+motir-core, motir-ai or AWS anywhere: the story's verification recipe.
+`tests/integration/api-journey.test.ts` runs the same steps against two copies
+of the server on every pull request. The calls use `curl` 7.82 or later
+(`--json`) and `jq`.
+
+1. Start Postgres (see [Prerequisites](#prerequisites)), then create the logins
+   and the schema, and start the server:
+
+   ```sh
+   pnpm db:bootstrap
+   pnpm db:migrate
+   pnpm serve
+   ```
+
+2. In another shell, make the first operator and keep its token:
+
+   ```sh
+   export OPERATOR_TOKEN=$(pnpm --silent operator:bootstrap)
+   export API=http://localhost:8080
+   op() { curl -s -H "Authorization: Bearer $OPERATOR_TOKEN" "$@"; }
+   ```
+
+3. As the operator, create two tenants with a repository each, a client, its
+   credential (the token is in this one answer and never again), and a grant
+   to the first tenant only:
+
+   ```sh
+   A=$(op $API/v1/operator/tenants --json '{"displayName":"Acme"}' | jq -r .tenantId)
+   B=$(op $API/v1/operator/tenants --json '{"displayName":"Globex"}' | jq -r .tenantId)
+   RA=$(op $API/v1/operator/repositories --json "{\"tenantId\":\"$A\",\"displayName\":\"acme-web\"}" | jq -r .repositoryId)
+   RB=$(op $API/v1/operator/repositories --json "{\"tenantId\":\"$B\",\"displayName\":\"globex-core\"}" | jq -r .repositoryId)
+   CLIENT=$(op $API/v1/operator/clients --json '{"name":"motir-ai","kind":"client"}' | jq -r .clientId)
+   export CLIENT_TOKEN=$(op -X POST $API/v1/operator/clients/$CLIENT/credentials | jq -r .token)
+   op $API/v1/operator/grants --json "{\"clientId\":\"$CLIENT\",\"tenantId\":\"$A\"}"
+   op $API/v1/operator/clients/$CLIENT
+   ```
+
+   The last call lists the credential's id and display prefix, and no token.
+
+4. As the client, read the first repository's status:
+
+   ```sh
+   cl() { curl -s -H "Authorization: Bearer $CLIENT_TOKEN" "$@"; }
+   cl $API/v1/tenants/$A/repositories/$RA/status
+   ```
+
+   ```text
+   {"tenantId":"…","repositoryId":"…","state":"not_indexed","indexedCommit":null,"inProgressJob":null,"lastFailure":null,"languages":[]}
+   ```
+
+5. The client is refused the other tenant (403) and an unknown repository
+   (404), each in the one error body:
+
+   ```sh
+   cl $API/v1/tenants/$B/repositories/$RB/status
+   cl $API/v1/tenants/$A/repositories/00000000-0000-4000-8000-000000000000/status
+   ```
+
+   ```text
+   {"error":{"code":"permission_denied","message":"The credential may not use this tenant."}}
+   {"error":{"code":"repository_not_found","message":"No such repository."}}
+   ```
+
+6. No credential, or a made-up one, is 401; the client on an operator call is
+   403:
+
+   ```sh
+   curl -s $API/v1/tenants/$A/repositories/$RA/status
+   curl -s -H 'Authorization: Bearer cgk_made_up' $API/v1/tenants/$A/repositories/$RA/status
+   cl $API/v1/operator/tenants --json '{"displayName":"Sneaky"}'
+   ```
+
+7. Revoke the grant; the client's next call is refused, with no restart:
+
+   ```sh
+   op $API/v1/operator/grants/revoke --json "{\"clientId\":\"$CLIENT\",\"tenantId\":\"$A\"}"
+   cl $API/v1/tenants/$A/repositories/$RA/status
+   ```
+
+8. Grant it again; the client deletes its repository (204, then 404 on a
+   second try), and the operator deletes the other tenant:
+
+   ```sh
+   op $API/v1/operator/grants --json "{\"clientId\":\"$CLIENT\",\"tenantId\":\"$A\"}"
+   cl -o /dev/null -w '%{http_code}\n' -X DELETE $API/v1/tenants/$A/repositories/$RA
+   cl -X DELETE $API/v1/tenants/$A/repositories/$RA
+   op -o /dev/null -w '%{http_code}\n' -X DELETE $API/v1/tenants/$B
+   ```
+
+   ```text
+   204
+   {"error":{"code":"repository_not_found","message":"No such repository."}}
+   204
+   ```
+
+9. Stop Postgres and `curl -i $API/health` answers `503`. Then run the suite:
+
+   ```sh
+   pnpm test
+   ```
+
+The rules every route follows are in [`docs/api-contract.md`](docs/api-contract.md).
+
 ## Where to go next
 
 Adding a table? Read [`docs/schema-contract.md`](docs/schema-contract.md): the
 rules every per-repository table follows so it is isolated, deleted and checked
 like the foundation tables.
+
+Adding a route? Read [`docs/api-contract.md`](docs/api-contract.md): the one
+authentication and binding path, the refusal codes, the status shape and the
+content access log every route follows.

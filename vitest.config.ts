@@ -21,7 +21,9 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       // The CLI entry points only read the environment and call src/db; CI's
       // `db:bootstrap` and `db:migrate` steps run them on every pull request.
-      exclude: ['src/cli/**'],
+      // The server's entry point only wires signals to `runServer`, which is
+      // covered in-process; tests/server/main.test.ts runs it as a process.
+      exclude: ['src/cli/**', 'src/server/main.ts'],
       reporter: ['text', 'json-summary'],
     },
   },
