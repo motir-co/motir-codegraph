@@ -1,0 +1,324 @@
+{
+  "description": "One entry per file under fixtures/sample-tree/: the language it exercises (null for none), the outcome the store library must record for it, the fact kinds it must yield, the reference kind its calls take (null when the language's tags query captures no call), and the inheritance its own bytes express (token) with the relation the extractor must report.",
+  "fixtures": [
+    {
+      "path": "binary/pixel.bin",
+      "language": null,
+      "outcome": "binary",
+      "parsedWithErrors": null,
+      "factKinds": [],
+      "callReferenceKind": null,
+      "inheritance": null
+    },
+    {
+      "path": "languages/c/shapes.c",
+      "language": "c",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import"],
+      "callReferenceKind": null,
+      "inheritance": null
+    },
+    {
+      "path": "languages/cpp/shapes.cpp",
+      "language": "cpp",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance"],
+      "callReferenceKind": null,
+      "inheritance": {
+        "token": ": public Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/csharp/Shapes.cs",
+      "language": "csharp",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "send",
+      "inheritance": {
+        "token": "class Circle : Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/dart/shapes.dart",
+      "language": "dart",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle extends Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/elixir/shapes.ex",
+      "language": "elixir",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "@behaviour Geometry.Shape",
+        "relation": "implements",
+        "name": "Geometry.Circle",
+        "parentName": "Geometry.Shape"
+      }
+    },
+    {
+      "path": "languages/go/shapes.go",
+      "language": "go",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "type Drawer interface {\n\tShape",
+        "relation": "extends",
+        "name": "Drawer",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/haskell/Shapes.hs",
+      "language": "haskell",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "instance Show Circle",
+        "relation": "implements",
+        "name": "Circle",
+        "parentName": "Show"
+      }
+    },
+    {
+      "path": "languages/java/Shapes.java",
+      "language": "java",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle extends Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/javascript/shapes.js",
+      "language": "javascript",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle extends Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/kotlin/Shapes.kt",
+      "language": "kotlin",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle : Shape()",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/lua/shapes.lua",
+      "language": "lua",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": null
+    },
+    {
+      "path": "languages/php/Shapes.php",
+      "language": "php",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle extends Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/python/shapes.py",
+      "language": "python",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle(Shape)",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/ruby/shapes.rb",
+      "language": "ruby",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle < Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/rust/shapes.rs",
+      "language": "rust",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "impl Shape for Circle",
+        "relation": "implements",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/scala/Shapes.scala",
+      "language": "scala",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle extends Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/solidity/Shapes.sol",
+      "language": "solidity",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "contract Circle is Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/tsx/Shapes.tsx",
+      "language": "tsx",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle extends Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "languages/typescript/shapes.ts",
+      "language": "typescript",
+      "outcome": "indexed",
+      "parsedWithErrors": false,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": {
+        "token": "class Circle extends Shape",
+        "relation": "extends",
+        "name": "Circle",
+        "parentName": "Shape"
+      }
+    },
+    {
+      "path": "over-cap/large.txt",
+      "language": null,
+      "outcome": "refused",
+      "parsedWithErrors": null,
+      "factKinds": [],
+      "callReferenceKind": null,
+      "inheritance": null
+    },
+    {
+      "path": "syntax-error/broken.ts",
+      "language": "typescript",
+      "outcome": "indexed",
+      "parsedWithErrors": true,
+      "factKinds": ["definition", "import", "inheritance", "reference"],
+      "callReferenceKind": "call",
+      "inheritance": null
+    },
+    {
+      "path": "unsupported/Circle.swift",
+      "language": "swift",
+      "outcome": "unsupported",
+      "parsedWithErrors": null,
+      "factKinds": [],
+      "callReferenceKind": null,
+      "inheritance": null
+    },
+    {
+      "path": "unsupported/Circle.vb",
+      "language": "visualbasic",
+      "outcome": "unsupported",
+      "parsedWithErrors": null,
+      "factKinds": [],
+      "callReferenceKind": null,
+      "inheritance": null
+    },
+    {
+      "path": "unsupported/kernel.cu",
+      "language": "cuda",
+      "outcome": "unsupported",
+      "parsedWithErrors": null,
+      "factKinds": [],
+      "callReferenceKind": null,
+      "inheritance": null
+    },
+    {
+      "path": "unsupported/notes.txt",
+      "language": null,
+      "outcome": "unsupported",
+      "parsedWithErrors": null,
+      "factKinds": [],
+      "callReferenceKind": null,
+      "inheritance": null
+    }
+  ]
+}
