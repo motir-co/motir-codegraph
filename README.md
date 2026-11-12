@@ -265,10 +265,27 @@ it cannot be shown again: keep it. The command refuses, prints no token and
 exits 1 once any operator exists; later operators are created with
 `POST /v1/operator/clients` and `"kind": "operator"`.
 
+### From a deploy: `OPERATOR_TOKEN`
+
+A deploy that runs the command on every release sets `OPERATOR_TOKEN` to a
+token it generated and keeps in its own secret store (`cgk_` and at least 9
+more characters; on AWS, motir-infra's `<namePrefix>/codegraph-v2/operator-token`):
+
+```sh
+OPERATOR_TOKEN=cgk_... pnpm operator:bootstrap
+```
+
+The command then registers that token as the first operator's credential
+instead of minting one (only its SHA-256 and its first 12 characters are
+stored) and prints nothing on stdout. Once any operator exists it changes
+nothing, notes so on stderr and exits 0, so a second release passes. A value
+without the `cgk_` prefix is refused: it exits 1 and creates nothing. An empty
+`OPERATOR_TOKEN` counts as unset, so the command mints and prints as above.
+
 With the server running (`pnpm serve`), use the token for an operator call:
 
 ```sh
-export OPERATOR_TOKEN=<the printed token>
+export OPERATOR_TOKEN=<the printed token>   # unset it before running the bootstrap again
 curl -s -X POST http://localhost:8080/v1/operator/tenants \
   -H "Authorization: Bearer $OPERATOR_TOKEN" \
   -H 'content-type: application/json' \
