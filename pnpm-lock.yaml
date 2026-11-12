@@ -17,6 +17,9 @@ importers:
       pg:
         specifier: ^8.23.1
         version: 8.23.1
+      web-tree-sitter:
+        specifier: 0.27.2
+        version: 0.27.2
     devDependencies:
       '@eslint/js':
         specifier: ^10.0.1
@@ -1274,6 +1277,9 @@ packages:
       jsdom:
         optional: true
 
+  web-tree-sitter@0.27.2:
+    resolution: {integrity: sha512-ZRo86GKI4aOSBAqOrPmCtriExI3xIzu1sNw/V6v3b4QGxrEmO19FGwbMNdyhw3MJLAZIw0xAV0oSpqX361eAyQ==}
+
   which@2.0.2:
     resolution: {integrity: sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==}
     engines: {node: '>= 8'}
@@ -2351,6 +2357,8 @@ snapshots:
       '@vitest/coverage-v8': 5.1.0(vitest@5.1.0)
     transitivePeerDependencies:
       - msw
+
+  web-tree-sitter@0.27.2: {}
 
   which@2.0.2:
     dependencies:
