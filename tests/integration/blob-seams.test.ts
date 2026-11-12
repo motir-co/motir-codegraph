@@ -540,6 +540,14 @@ describe('the fact table’s own refusals', () => {
     expect(
       await attempt(base('reference'), { ...base('reference'), extractor_version: 'v2' }),
     ).toBe(UNIQUE_VIOLATION);
+    // imported_names is not part of the key: one import per specifier at one range.
+    expect(await attempt(base('import'), { ...base('import'), imported_names: ['b'] })).toBe(
+      UNIQUE_VIOLATION,
+    );
+    // The enclosing name is: the same definition inside another one is another fact.
+    expect(
+      await attempt(base('definition'), { ...base('definition'), enclosing_name: 'Outer' }),
+    ).toBeNull();
     // The producer is part of the key: another producer's identical fact is admitted.
     expect(
       await attempt(base('reference'), { ...base('reference'), producer: 'other' }),

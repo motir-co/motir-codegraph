@@ -303,6 +303,42 @@ describe('storeBlob', () => {
     expect(brokenFacts.some((f) => f.kind === 'definition' && f.name === 'Repo')).toBe(true);
   });
 
+  it('indexes a file whose import list and names are far over a btree entry’s 2,704 bytes', async () => {
+    // Random names, so no compression brings an index entry back under the limit.
+    const word = (prefix: string, bytes: number) =>
+      `${prefix}${randomBytes(bytes).toString('hex')}`;
+    const names = Array.from({ length: 600 }, (_, n) => word(`Icon${String(n)}_`, 8));
+    const longName = word('f', 2000);
+    const longParent = word('Base', 2000);
+    const longModule = `./${word('m', 1500)}`;
+    const source = [
+      `import { ${names.join(', ')} } from '${longModule}';`,
+      `export function ${longName}() { return ${longName}(); }`,
+      `export class Shape extends ${longParent} {}`,
+      '',
+    ].join('\n');
+    const file = input(Buffer.from(source, 'utf8'), 'src/icons.ts');
+    expect(await storeBlob(app, file)).toMatchObject({
+      outcome: 'indexed',
+      parsedWithErrors: false,
+    });
+    const { facts } = await rowsOf(tenantA, file.gitBlobHash);
+    expect(facts).toContainEqual(
+      expect.objectContaining({
+        kind: 'import',
+        module_specifier: longModule,
+        imported_names: names,
+      }),
+    );
+    expect(facts).toContainEqual(expect.objectContaining({ kind: 'definition', name: longName }));
+    expect(facts).toContainEqual(
+      expect.objectContaining({ kind: 'reference', name: longName, enclosing_name: longName }),
+    );
+    expect(facts).toContainEqual(
+      expect.objectContaining({ kind: 'inheritance', name: 'Shape', parent_name: longParent }),
+    );
+  });
+
   it('keeps a byte order mark, and flags invalid UTF-8 as lossy with U+FFFD stored', async () => {
     const bom = Buffer.concat([
       Buffer.from([0xef, 0xbb, 0xbf]),

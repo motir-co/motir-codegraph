@@ -98,23 +98,36 @@ CREATE TABLE codegraph.blob_fact (
 
   CONSTRAINT blob_fact_blob_fkey
     FOREIGN KEY (tenant_id, git_blob_hash)
-    REFERENCES codegraph.blob (tenant_id, git_blob_hash) ON DELETE CASCADE,
-
-  -- The row's whole identity, the extractor version aside. NULLS NOT DISTINCT
-  -- (PostgreSQL 15+): under the default, two rows differing only in a column
-  -- their kind leaves NULL would both be accepted, and duplicate facts with them.
-  CONSTRAINT blob_fact_identity_key UNIQUE NULLS NOT DISTINCT (
-    tenant_id, git_blob_hash, producer,
-    kind, name,
-    start_line, start_column, end_line, end_column, enclosing_name,
-    definition_kind, reference_kind, module_specifier, imported_names,
-    parent_name, relation
-  )
+    REFERENCES codegraph.blob (tenant_id, git_blob_hash) ON DELETE CASCADE
 );
 
--- A lookup by name within a tenant. One blob's facts are read through the
--- identity key's index, which leads with (tenant_id, git_blob_hash).
-CREATE INDEX blob_fact_name_idx ON codegraph.blob_fact (tenant_id, name, kind);
+-- A row's identity, the extractor version aside: the producer, the kind, the
+-- range and the text that names the fact. NULLS NOT DISTINCT (PostgreSQL 15+):
+-- under the default, two rows differing only in a column their kind leaves
+-- NULL would both be accepted, and duplicate facts with them.
+--
+-- Every column in a btree entry must fit one index tuple (2,704 bytes), and a
+-- name, an enclosing name, a module specifier or a parent name is source text
+-- of any length. So those four go into the key as one fixed-size md5 over
+-- their quoted values, quote_nullable keeping a NULL apart from the text
+-- 'NULL'; the fixed-size columns go in as they are. md5 is a digest here, not
+-- a security boundary: a crafted collision could only make its own tenant's
+-- file fail to store. imported_names is not part of the identity: an import is
+-- one per specifier at one range, and the extractor merges the names of two
+-- matches of one statement into it (src/extract/buildFacts.ts).
+CREATE UNIQUE INDEX blob_fact_identity_key ON codegraph.blob_fact (
+  tenant_id, git_blob_hash, producer, kind,
+  start_line, start_column, end_line, end_column,
+  definition_kind, reference_kind, relation,
+  md5(quote_nullable(name) || ',' || quote_nullable(enclosing_name) || ','
+      || quote_nullable(module_specifier) || ',' || quote_nullable(parent_name))
+) NULLS NOT DISTINCT;
+
+-- A lookup by name. A hash index, because a name can exceed a btree entry's
+-- limit and a lookup by name is equality; the tenant comes from the policy.
+-- One blob's facts are read through the identity key's index, which leads
+-- with (tenant_id, git_blob_hash).
+CREATE INDEX blob_fact_name_idx ON codegraph.blob_fact USING hash (name);
 
 -- ── row-level security ─────────────────────────────────────────────────────
 ALTER TABLE codegraph.blob_fact ENABLE ROW LEVEL SECURITY;
