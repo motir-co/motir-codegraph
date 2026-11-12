@@ -279,6 +279,112 @@ curl -s -X POST http://localhost:8080/v1/operator/tenants \
 {"tenantId":"6f1c2c0e-3a4b-4f7d-9c55-0b8f2f0e7a11"}
 ```
 
+## Try the API
+
+The whole journey a client and an operator take, on this machine, with no
+motir-core, motir-ai or AWS anywhere: the story's verification recipe.
+`tests/integration/api-journey.test.ts` runs the same steps against two copies
+of the server on every pull request. The calls use `curl` 7.82 or later
+(`--json`) and `jq`.
+
+1. Start Postgres (see [Prerequisites](#prerequisites)), then create the logins
+   and the schema, and start the server:
+
+   ```sh
+   pnpm db:bootstrap
+   pnpm db:migrate
+   pnpm serve
+   ```
+
+2. In another shell, make the first operator and keep its token:
+
+   ```sh
+   export OPERATOR_TOKEN=$(pnpm --silent operator:bootstrap)
+   export API=http://localhost:8080
+   op() { curl -s -H "Authorization: Bearer $OPERATOR_TOKEN" "$@"; }
+   ```
+
+3. As the operator, create two tenants with a repository each, a client, its
+   credential (the token is in this one answer and never again), and a grant
+   to the first tenant only:
+
+   ```sh
+   A=$(op $API/v1/operator/tenants --json '{"displayName":"Acme"}' | jq -r .tenantId)
+   B=$(op $API/v1/operator/tenants --json '{"displayName":"Globex"}' | jq -r .tenantId)
+   RA=$(op $API/v1/operator/repositories --json "{\"tenantId\":\"$A\",\"displayName\":\"acme-web\"}" | jq -r .repositoryId)
+   RB=$(op $API/v1/operator/repositories --json "{\"tenantId\":\"$B\",\"displayName\":\"globex-core\"}" | jq -r .repositoryId)
+   CLIENT=$(op $API/v1/operator/clients --json '{"name":"motir-ai","kind":"client"}' | jq -r .clientId)
+   export CLIENT_TOKEN=$(op -X POST $API/v1/operator/clients/$CLIENT/credentials | jq -r .token)
+   op $API/v1/operator/grants --json "{\"clientId\":\"$CLIENT\",\"tenantId\":\"$A\"}"
+   op $API/v1/operator/clients/$CLIENT
+   ```
+
+   The last call lists the credential's id and display prefix, and no token.
+
+4. As the client, read the first repository's status:
+
+   ```sh
+   cl() { curl -s -H "Authorization: Bearer $CLIENT_TOKEN" "$@"; }
+   cl $API/v1/tenants/$A/repositories/$RA/status
+   ```
+
+   ```text
+   {"tenantId":"…","repositoryId":"…","state":"not_indexed","indexedCommit":null,"inProgressJob":null,"lastFailure":null,"languages":[]}
+   ```
+
+5. The client is refused the other tenant (403) and an unknown repository
+   (404), each in the one error body:
+
+   ```sh
+   cl $API/v1/tenants/$B/repositories/$RB/status
+   cl $API/v1/tenants/$A/repositories/00000000-0000-4000-8000-000000000000/status
+   ```
+
+   ```text
+   {"error":{"code":"permission_denied","message":"The credential may not use this tenant."}}
+   {"error":{"code":"repository_not_found","message":"No such repository."}}
+   ```
+
+6. No credential, or a made-up one, is 401; the client on an operator call is
+   403:
+
+   ```sh
+   curl -s $API/v1/tenants/$A/repositories/$RA/status
+   curl -s -H 'Authorization: Bearer cgk_made_up' $API/v1/tenants/$A/repositories/$RA/status
+   cl $API/v1/operator/tenants --json '{"displayName":"Sneaky"}'
+   ```
+
+7. Revoke the grant; the client's next call is refused, with no restart:
+
+   ```sh
+   op $API/v1/operator/grants/revoke --json "{\"clientId\":\"$CLIENT\",\"tenantId\":\"$A\"}"
+   cl $API/v1/tenants/$A/repositories/$RA/status
+   ```
+
+8. Grant it again; the client deletes its repository (204, then 404 on a
+   second try), and the operator deletes the other tenant:
+
+   ```sh
+   op $API/v1/operator/grants --json "{\"clientId\":\"$CLIENT\",\"tenantId\":\"$A\"}"
+   cl -o /dev/null -w '%{http_code}\n' -X DELETE $API/v1/tenants/$A/repositories/$RA
+   cl -X DELETE $API/v1/tenants/$A/repositories/$RA
+   op -o /dev/null -w '%{http_code}\n' -X DELETE $API/v1/tenants/$B
+   ```
+
+   ```text
+   204
+   {"error":{"code":"repository_not_found","message":"No such repository."}}
+   204
+   ```
+
+9. Stop Postgres and `curl -i $API/health` answers `503`. Then run the suite:
+
+   ```sh
+   pnpm test
+   ```
+
+The rules every route follows are in [`docs/api-contract.md`](docs/api-contract.md).
+
 ## Where to go next
 
 Adding a table? Read [`docs/schema-contract.md`](docs/schema-contract.md): the

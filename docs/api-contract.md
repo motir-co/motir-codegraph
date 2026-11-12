@@ -154,7 +154,8 @@ or any query of its own runs, and each SQL function it calls refuses again with
 
 `displayName` and `name` are 1–200 characters and not blank; `kind` is `client`
 or `operator`; ids are uuids. A body with an unknown field is 400
-`invalid_request`, as is a malformed id or value.
+`invalid_request`, as is a malformed id or value. A call with no body (the issue and revoke calls) sends no
+`Content-Type: application/json`: an empty JSON body is 400 `invalid_request`.
 
 - **A token is shown once.** The server mints it (`cgk_` and 32 random bytes in
   base64url, 47 characters) and returns it only in the 201 answer of the issue
