@@ -5,7 +5,8 @@ tables (blobs, commit layers, file contents, the queue), the read API's tables,
 and the SCIP tables. The foundation tables in
 [`db/migrations/0001_tenancy.sql`](../db/migrations/0001_tenancy.sql) and
 [`0002_row_level_security.sql`](../db/migrations/0002_row_level_security.sql)
-already follow them; copy their shape.
+already follow them; copy their shape. The rules for the routes that read and
+write these tables are in [`docs/api-contract.md`](api-contract.md).
 
 ## 1. Why the contract exists
 
@@ -160,3 +161,4 @@ time and what was read (`content_ref`). The read API epic writes those rows.
 `codegraph_app` may only **append** to that table: it holds INSERT and nothing
 else, so it can neither read the log back nor change or remove a row, and the
 tenant policy's WITH CHECK refuses a row for any tenant but the bound one.
+The route side of this rule is [`docs/api-contract.md`](api-contract.md) §8.

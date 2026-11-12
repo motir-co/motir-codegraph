@@ -284,3 +284,7 @@ curl -s -X POST http://localhost:8080/v1/operator/tenants \
 Adding a table? Read [`docs/schema-contract.md`](docs/schema-contract.md): the
 rules every per-repository table follows so it is isolated, deleted and checked
 like the foundation tables.
+
+Adding a route? Read [`docs/api-contract.md`](docs/api-contract.md): the one
+authentication and binding path, the refusal codes, the status shape and the
+content access log every route follows.
