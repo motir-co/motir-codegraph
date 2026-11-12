@@ -4,6 +4,7 @@ import { ApiError, ERROR_STATUS, type ErrorCode } from '../../src/server/errors.
 import type { V1Routes } from '../../src/server/v1.js';
 import { freshDatabase, type FreshDatabase } from '../helpers/db.js';
 import { call, startServer, type ServerCopy } from '../helpers/server.js';
+import { buildTenancyFixture, type TenancyFixture } from '../helpers/tenancy.js';
 
 const THROWN: ErrorCode[] = [
   'unauthenticated',
@@ -13,7 +14,8 @@ const THROWN: ErrorCode[] = [
   'service_unavailable',
 ];
 
-// Test-only routes: one per code, and one that throws an ordinary Error.
+// Test-only routes under /v1 (so behind authentication): one per code, and one
+// that throws an ordinary Error.
 const throwing: V1Routes = (v1) => {
   v1.get<{ Params: { code: ErrorCode } }>('/throw/:code', (request) => {
     throw new ApiError(request.params.code, `refused with ${request.params.code}`);
@@ -25,9 +27,11 @@ const throwing: V1Routes = (v1) => {
 
 let db: FreshDatabase;
 let server: ServerCopy;
+let fx: TenancyFixture;
 
 beforeAll(async () => {
   db = await freshDatabase();
+  fx = await buildTenancyFixture(db);
   server = await startServer(db.appUrl, { v1Routes: [throwing] });
 });
 
@@ -38,7 +42,7 @@ afterAll(async () => {
 
 describe('the one error body', () => {
   it.each(THROWN)('answers %s with its status and code', async (code) => {
-    const response = await call(server.baseUrl, `/v1/throw/${code}`);
+    const response = await call(server.baseUrl, `/v1/throw/${code}`, { token: fx.readerToken });
     expect(response.status).toBe(ERROR_STATUS[code]);
     expect(response.body).toEqual({ error: { code, message: `refused with ${code}` } });
   });
@@ -52,7 +56,7 @@ describe('the one error body', () => {
   });
 
   it('answers an ordinary Error 500 internal_error without its message or stack', async () => {
-    const response = await call(server.baseUrl, '/v1/crash');
+    const response = await call(server.baseUrl, '/v1/crash', { token: fx.readerToken });
     expect(response.status).toBe(500);
     expect(response.body).toEqual({
       error: { code: 'internal_error', message: 'The server could not complete the request.' },

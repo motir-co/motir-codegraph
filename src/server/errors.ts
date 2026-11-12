@@ -1,4 +1,5 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
+import pg from 'pg';
 
 /**
  * Every error the server answers, by code. The code is what a caller branches
@@ -15,6 +16,9 @@ export const ERROR_STATUS = {
 } as const;
 
 export type ErrorCode = keyof typeof ERROR_STATUS;
+
+/** SQLSTATE 42501. */
+export const INSUFFICIENT_PRIVILEGE = '42501';
 
 /** The one error body every refusal and failure is answered with. */
 export interface ErrorBody {
@@ -57,6 +61,12 @@ export function handleError(
 ): FastifyReply {
   if (error instanceof ApiError) {
     return sendError(reply, error.code, error.message);
+  }
+  // The database refusing the bound client (codegraph_require_operator() in
+  // every operator function raises insufficient_privilege) is the same
+  // refusal as the server's own guards.
+  if (error instanceof pg.DatabaseError && error.code === INSUFFICIENT_PRIVILEGE) {
+    return sendError(reply, 'permission_denied', 'The credential may not make this call.');
   }
   request.log.error({ err: error }, 'unhandled error');
   return sendError(reply, 'internal_error', 'The server could not complete the request.');

@@ -40,7 +40,13 @@ export async function inBoundTransaction<T>(
 
 /** A fresh token's SHA-256, the only form the database ever stores. */
 export function tokenHash(): Buffer {
-  return createHash('sha256').update(randomBytes(32)).digest();
+  return newToken().hash;
+}
+
+/** A fresh raw token and its SHA-256, hashed the way the server hashes one. */
+export function newToken(): { token: string; hash: Buffer } {
+  const token = `test_${randomBytes(24).toString('base64url')}`;
+  return { token, hash: createHash('sha256').update(token, 'utf8').digest() };
 }
 
 async function scalar(client: pg.Client, sql: string, params: unknown[]): Promise<string> {
@@ -56,6 +62,9 @@ export interface TenancyFixture {
   operatorId: string;
   readerId: string;
   readerHash: Buffer;
+  /** The raw tokens behind the operator's and the reader's credentials. */
+  operatorToken: string;
+  readerToken: string;
   tenantA: { id: string; name: string; repositories: { id: string; name: string }[] };
   tenantB: { id: string; name: string; repositories: { id: string; name: string }[] };
 }
@@ -74,10 +83,12 @@ export async function buildTenancyFixture(
   },
 ): Promise<TenancyFixture> {
   const suffix = randomBytes(3).toString('hex');
+  const operator = newToken();
+  const reader = newToken();
   const operatorId = await withClient(urls.ownerUrl, (c) =>
     scalar(c, 'SELECT codegraph.codegraph_bootstrap_operator($1, $2, $3) AS value', [
       `operator-${suffix}`,
-      tokenHash(),
+      operator.hash,
       'cg_op',
     ]),
   );
@@ -108,15 +119,43 @@ export async function buildTenancyFixture(
           `reader-${suffix}`,
           'client',
         ]);
-        const readerHash = tokenHash();
+        const readerHash = reader.hash;
         await call('codegraph.codegraph_issue_credential($1, $2, $3)', [
           readerId,
           readerHash,
           'cg_rd',
         ]);
         await call('codegraph.codegraph_grant_access($1, $2)', [readerId, tenantA.id]);
-        return { operatorId, readerId, readerHash, tenantA, tenantB };
+        return {
+          operatorId,
+          readerId,
+          readerHash,
+          operatorToken: operator.token,
+          readerToken: reader.token,
+          tenantA,
+          tenantB,
+        };
       },
+      { commit: true },
+    ),
+  );
+}
+
+/**
+ * Runs one operator function as codegraph_app with `operatorId` bound, and
+ * commits: the way an operator route will call it.
+ */
+export async function asOperator<T = unknown>(
+  appUrl: string,
+  operatorId: string,
+  sql: string,
+  params: unknown[] = [],
+): Promise<T | undefined> {
+  return await withClient(appUrl, (c) =>
+    inBoundTransaction(
+      c,
+      { clientId: operatorId },
+      async () => (await queryRows<{ value: T }>(c, `SELECT ${sql} AS value`, params))[0]?.value,
       { commit: true },
     ),
   );
