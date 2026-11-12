@@ -1,12 +1,23 @@
 import pg from 'pg';
 
-import { mintToken } from '../server/tokens.js';
+import { hashToken } from '../server/auth.js';
+import {
+  DISPLAY_PREFIX_LENGTH,
+  mintToken,
+  TOKEN_PREFIX,
+  type MintedToken,
+} from '../server/tokens.js';
 import { OWNER_LOGIN, parseConnectionUrl } from './connection.js';
 
 export interface BootstrapOperatorOptions {
   /** codegraph_owner's URL: DATABASE_URL. */
   ownerUrl: string;
   name?: string;
+  /**
+   * A `cgk_` token generated elsewhere (a deploy's secret) to register instead
+   * of minting one. The database stores only its hash and display prefix.
+   */
+  token?: string;
 }
 
 export interface BootstrappedOperator {
@@ -33,15 +44,34 @@ export class OperatorExistsError extends Error {
   }
 }
 
+/** A token that is not one this service issues: no `cgk_` prefix. */
+export class InvalidOperatorTokenError extends Error {
+  constructor() {
+    super(`OPERATOR_TOKEN is not a ${TOKEN_PREFIX} token; it registers no operator.`);
+    this.name = 'InvalidOperatorTokenError';
+  }
+}
+
+/** The credential to store: `token`'s hash and display prefix, or a newly minted one. */
+function credentialOf(token: string | undefined): MintedToken {
+  if (token === undefined) return mintToken();
+  // Longer than the prefix alone, so the display prefix never equals the whole token.
+  if (!token.startsWith(TOKEN_PREFIX) || token.length <= DISPLAY_PREFIX_LENGTH) {
+    throw new InvalidOperatorTokenError();
+  }
+  return { token, hash: hashToken(token), displayPrefix: token.slice(0, DISPLAY_PREFIX_LENGTH) };
+}
+
 /**
  * Creates the first operator client and its credential, as codegraph_owner,
- * and returns its token once. Refuses when any operator exists, so this one
+ * and returns its token once — minted here, or the `token` it was given. Refuses when any operator exists, so this one
  * door that needs no credential can never mint a second operator. An advisory
  * lock held for the transaction makes two concurrent runs create one operator.
  */
 export async function bootstrapOperator(
   options: BootstrapOperatorOptions,
 ): Promise<BootstrappedOperator> {
+  const minted = credentialOf(options.token);
   const owner = parseConnectionUrl('DATABASE_URL', options.ownerUrl);
   if (owner.user !== OWNER_LOGIN) {
     throw new Error(`DATABASE_URL must connect as ${OWNER_LOGIN}, not ${owner.user}.`);
@@ -60,7 +90,6 @@ export async function bootstrapOperator(
       if (existing > 0) {
         throw new OperatorExistsError(existing);
       }
-      const minted = mintToken();
       const created = await client.query<{ id: string }>(
         'SELECT codegraph.codegraph_bootstrap_operator($1, $2, $3) AS id',
         [options.name ?? DEFAULT_OPERATOR_NAME, minted.hash, minted.displayPrefix],

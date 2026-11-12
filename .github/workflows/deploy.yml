@@ -1,0 +1,214 @@
+name: Deploy
+
+# Ships motir-codegraph onto the ECS service motir-infra runs (MOTIR-11102):
+# build the root Dockerfile once, push it to the code graph's ECR repository,
+# and hand the digest the push answered to motir-infra's
+# `pnpm deploy:services codegraph-v2`, which runs the release task (migrate,
+# then bootstrap the operator) and only then rolls the API. README § Deploy.
+#
+# Every push to `main` deploys: a commit reaches `main` only through the merge
+# queue, which `CI complete` gates. `workflow_dispatch` is the hand run: the
+# first deploy after motir-infra's half lands, or a re-deploy of `main`.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# The OIDC token the AWS roles trust, and a read-only checkout. Nothing here
+# writes to the repository.
+permissions:
+  contents: read
+  id-token: write
+
+# Two merges queue; a running deploy is never cancelled by the next one.
+concurrency:
+  group: aws-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    # Only `main` is trusted by the roles; a dispatch from another branch would
+    # be refused by AWS, so it is refused here first, with a reason.
+    if: github.ref == 'refs/heads/main'
+    # The build, the safety check's stack wait (20 min ceiling), the release task
+    # (30 min ceiling) and up to 30 min for the rollout.
+    timeout-minutes: 100
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_DEPLOY_NAME_PREFIX: ${{ vars.AWS_DEPLOY_NAME_PREFIX }}
+    steps:
+      - name: Check the repository variables
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          AWS_ECR_PUSH_ROLE_ARN: ${{ vars.AWS_ECR_PUSH_ROLE_ARN }}
+          MOTIR_INFRA_REF: ${{ vars.MOTIR_INFRA_REF }}
+        run: |
+          missing=""
+          for name in AWS_DEPLOY_ROLE_ARN AWS_ECR_PUSH_ROLE_ARN AWS_REGION AWS_DEPLOY_NAME_PREFIX MOTIR_INFRA_REF; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::the AWS deploy needs the repository variable(s):$missing (README § Deploy)"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # The manifest is the one place the job learns the ECR repository's name.
+      - name: Assume the deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Read the image repository from the deploy manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          manifest="$(aws ssm get-parameter --name "/$AWS_DEPLOY_NAME_PREFIX/codegraph-v2/deploy-manifest" \
+            --query Parameter.Value --output text)"
+          repository="$(jq -r '.images[] | select(.image == "codegraph-v2") | .repository' <<<"$manifest")"
+          if [ -z "$repository" ] || [ "$repository" = "null" ]; then
+            echo "::error::/$AWS_DEPLOY_NAME_PREFIX/codegraph-v2/deploy-manifest names no codegraph-v2 image"
+            exit 1
+          fi
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+
+      # The push role may push this one repository and nothing else.
+      - name: Assume the ECR push role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # The repository's tags are immutable, so a re-run of a commit whose image
+      # is already pushed takes that image's digest instead of failing the push.
+      - name: Look for this commit's image
+        id: existing
+        env:
+          REPOSITORY: ${{ steps.manifest.outputs.repository }}
+        run: |
+          set -euo pipefail
+          digest="$(aws ecr describe-images --repository-name "$REPOSITORY" \
+            --image-ids "imageTag=$GITHUB_SHA" \
+            --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)"
+          [ "$digest" = "None" ] && digest=""
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # linux/amd64 because the Fargate task definitions are X86_64; provenance
+      # off because an attestation turns the push into an image index whose
+      # digest is not the image's.
+      - name: Build and push the image
+        id: push
+        if: steps.existing.outputs.digest == ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ steps.manifest.outputs.repository }}:${{ github.sha }}
+
+      - name: Take the pushed digest
+        id: digest
+        env:
+          PUSHED: ${{ steps.push.outputs.digest }}
+          EXISTING: ${{ steps.existing.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="${PUSHED:-$EXISTING}"
+          if ! [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::the push answered no image digest: '$digest'"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Deploy to AWS"
+            echo "Image digest: \`$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # This workflow's own token cannot read motir-infra; an App token minted
+      # for this run can, read-only, and only that repository.
+      - name: Mint a motir-infra read token
+        id: infra-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.INFRA_READER_APP_ID }}
+          private-key: ${{ secrets.INFRA_READER_APP_PRIVATE_KEY }}
+          owner: motir-co
+          repositories: motir-infra
+          permission-contents: read
+      - uses: actions/checkout@v4
+        with:
+          repository: motir-co/motir-infra
+          ref: ${{ vars.MOTIR_INFRA_REF }}
+          token: ${{ steps.infra-token.outputs.token }}
+          path: motir-infra
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: motir-infra/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: motir-infra/.nvmrc
+      # `--ignore-workspace`: this checkout sits inside motir-codegraph's, whose
+      # root `pnpm-workspace.yaml` would otherwise make pnpm install this
+      # repository and leave motir-infra's own dependencies out.
+      - name: Install the deploy command
+        working-directory: motir-infra
+        env:
+          HUSKY: '0'
+        run: pnpm install --frozen-lockfile --ignore-workspace
+
+      - name: Assume the deploy role again
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      # Waits out a motir-infra update of the stack that owns the service, and
+      # stands down if this commit is no longer main's newest.
+      - name: Check it is safe to roll
+        id: gate
+        env:
+          DEPLOY_STACKS: ${{ vars.AWS_DEPLOY_NAME_PREFIX }}-codegraph-v2
+        run: bash scripts/ci/aws-deploy-gate.sh
+
+      # A fresh session for the roll: the role's sessions last an hour, and the
+      # check above may have spent 20 minutes of the last one waiting.
+      - name: Assume the deploy role for the roll
+        if: steps.gate.outputs.deploy == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # The command prints its progress and any reason it stopped on stderr and
+      # one JSON line on stdout, and exits 0 only when the digest is recorded.
+      - name: Deploy the image
+        if: steps.gate.outputs.deploy == 'true'
+        working-directory: motir-infra
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          set +e
+          pnpm --silent deploy:services codegraph-v2 --digest "codegraph-v2=$DIGEST" > "$RUNNER_TEMP/aws-deploy.json"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/aws-deploy.json"
+          {
+            echo "Deploy exit status: \`$code\`"
+            if [ -s "$RUNNER_TEMP/aws-deploy.json" ]; then
+              echo '```json'
+              tail -n 1 "$RUNNER_TEMP/aws-deploy.json"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::pnpm deploy:services codegraph-v2 exited $code; its reason is in the log above, and the service keeps the release it had (README § Deploy)"
+          fi
+          exit "$code"

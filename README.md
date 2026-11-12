@@ -265,10 +265,27 @@ it cannot be shown again: keep it. The command refuses, prints no token and
 exits 1 once any operator exists; later operators are created with
 `POST /v1/operator/clients` and `"kind": "operator"`.
 
+### From a deploy: `OPERATOR_TOKEN`
+
+A deploy that runs the command on every release sets `OPERATOR_TOKEN` to a
+token it generated and keeps in its own secret store (`cgk_` and at least 9
+more characters; on AWS, motir-infra's `<namePrefix>/codegraph-v2/operator-token`):
+
+```sh
+OPERATOR_TOKEN=cgk_... pnpm operator:bootstrap
+```
+
+The command then registers that token as the first operator's credential
+instead of minting one (only its SHA-256 and its first 12 characters are
+stored) and prints nothing on stdout. Once any operator exists it changes
+nothing, notes so on stderr and exits 0, so a second release passes. A value
+without the `cgk_` prefix is refused: it exits 1 and creates nothing. An empty
+`OPERATOR_TOKEN` counts as unset, so the command mints and prints as above.
+
 With the server running (`pnpm serve`), use the token for an operator call:
 
 ```sh
-export OPERATOR_TOKEN=<the printed token>
+export OPERATOR_TOKEN=<the printed token>   # unset it before running the bootstrap again
 curl -s -X POST http://localhost:8080/v1/operator/tenants \
   -H "Authorization: Bearer $OPERATOR_TOKEN" \
   -H 'content-type: application/json' \
@@ -384,6 +401,75 @@ of the server on every pull request. The calls use `curl` 7.82 or later
    ```
 
 The rules every route follows are in [`docs/api-contract.md`](docs/api-contract.md).
+
+## Deploy
+
+The service runs on Motir's AWS account, on an ECS service motir-infra builds
+(`motir-codegraph-v2`, its own stack, database and secrets: motir-infra
+MOTIR-10993). This repository ships the image.
+
+**The image.** The root `Dockerfile` builds the server (`pnpm build`) and runs
+it with `node dist/server/main.js`, node itself rather than `pnpm serve`, so the
+task's SIGTERM reaches the server's drain. The same image keeps `src/`, tsx and
+`db/migrations/`, so the deploy's release task runs `pnpm db:migrate` and then
+`pnpm operator:bootstrap` from it, with `OPERATOR_TOKEN` set (§ _From a deploy_
+above). It carries the pinned pnpm and Amazon's RDS CA bundle
+(`certs/rds-global-bundle.pem`, which motir-infra names in
+`NODE_EXTRA_CA_CERTS`), and runs as the unprivileged `node` user. CI's
+`Docker image` job builds it on every pull request. To build and run it
+locally against the database from § _Bring up_:
+
+```sh
+docker build -t motir-codegraph .
+docker run --rm --network host \
+  -e DATABASE_APP_URL=postgresql://codegraph_app:codegraph_app@localhost:5432/codegraph \
+  motir-codegraph
+```
+
+**A deploy.** `.github/workflows/deploy.yml` runs on every push to `main` (a
+commit reaches `main` only through the merge queue, behind `CI complete`) and by
+hand (`workflow_dispatch`). It:
+
+1. reads the ECR repository from `/<namePrefix>/codegraph-v2/deploy-manifest`,
+   under the deploy role;
+2. builds the image for `linux/amd64`, pushes it tagged with the commit under
+   the ECR push role, and takes the digest the push answered (a re-run takes
+   the digest already pushed);
+3. checks out motir-infra at `MOTIR_INFRA_REF` and runs
+   `pnpm deploy:services codegraph-v2 --digest codegraph-v2=<digest>`, after
+   `scripts/ci/aws-deploy-gate.sh` waits out an update of the
+   `<namePrefix>-codegraph-v2` stack. That command runs the release task (migrate,
+   then bootstrap the operator) and rolls the service only when it exits 0, then
+   records the digest. A failed release rolls nothing.
+
+Both roles are assumed through GitHub's OIDC token and trust only this
+repository's `main`. No AWS key is stored anywhere; `tests/ci/deploy-workflow.test.ts`
+holds the workflow to that.
+
+**What a person sets up once.** Repository variables (Settings → Secrets and
+variables → Actions → Variables):
+
+| Variable                 | Value                                                                                               |
+| ------------------------ | --------------------------------------------------------------------------------------------------- |
+| `AWS_DEPLOY_ROLE_ARN`    | the `CodegraphV2DeployRoleArn` output of motir-infra's `<namePrefix>-services-deploy` stack         |
+| `AWS_ECR_PUSH_ROLE_ARN`  | the `MotirCodegraphPushRoleArn` output of motir-infra's ECR stack                                   |
+| `AWS_REGION`             | the services account's region, e.g. `eu-central-1`                                                  |
+| `AWS_DEPLOY_NAME_PREFIX` | the install's `namePrefix` (`motir` in production)                                                  |
+| `MOTIR_INFRA_REF`        | the motir-infra commit or tag whose deploy command the job runs; pin a SHA and move it deliberately |
+
+and the secrets `INFRA_READER_APP_ID` and `INFRA_READER_APP_PRIVATE_KEY`: the
+organisation's GitHub App whose installation includes motir-infra, from which
+the job mints a token with `contents: read` on motir-infra only.
+
+**The first deploy is a hand run.** motir-infra creates the service with a
+desired count of 0 (`services.codegraphV2.running: false`), so its stacks deploy
+before any image exists. Once they are deployed and the variables above are
+set, run the workflow by hand (Actions → Deploy → Run workflow, on `main`). It
+pushes the first image, migrates the new database and registers the operator
+from the generated `operator-token` secret. Then switch
+`services.codegraphV2.running` to `true` in motir-infra and deploy it, which
+starts the service on the recorded digest. Every later push to `main` deploys
+on its own.
 
 ## Where to go next
 
