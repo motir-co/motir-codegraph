@@ -3,7 +3,7 @@ import type pg from 'pg';
 
 import { handleError, handleNotFound } from './errors.js';
 import { DEFAULT_HEALTH_TIMEOUT_MS, registerHealth } from './health.js';
-import { V1_PREFIX, v1Plugin, type V1Routes } from './v1.js';
+import { type RateLimitSettings, V1_PREFIX, v1Plugin, type V1Routes } from './v1.js';
 
 export interface BuildAppOptions {
   /** The codegraph_app pool every query runs on: the only state a copy shares. */
@@ -13,6 +13,8 @@ export interface BuildAppOptions {
   healthTimeoutMs?: number;
   /** Extra route modules mounted on `/v1`, for tests only. */
   v1Routes?: readonly V1Routes[];
+  /** The per-caller request limit on `/v1`; the default when unset. */
+  rateLimit?: RateLimitSettings;
 }
 
 export interface RegisteredRoute {
@@ -56,6 +58,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     prefix: V1_PREFIX,
     pool: options.pool,
     ...(options.v1Routes === undefined ? {} : { routes: options.v1Routes }),
+    ...(options.rateLimit === undefined ? {} : { rateLimit: options.rateLimit }),
   });
   await app.ready();
   return app;

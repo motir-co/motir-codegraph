@@ -4,6 +4,7 @@ import type pg from 'pg';
 import { requireEnv } from '../config.js';
 import { buildApp } from './app.js';
 import { createAppPool } from './pool.js';
+import { DEFAULT_RATE_LIMIT, type RateLimitSettings } from './v1.js';
 
 export const DEFAULT_PORT = 8080;
 export const DEFAULT_HOST = '0.0.0.0';
@@ -21,6 +22,22 @@ export function readPort(env: NodeJS.ProcessEnv): number {
   return port;
 }
 
+/**
+ * `RATE_LIMIT_PER_MINUTE`, the requests one caller may make to `/v1` per
+ * minute on one copy; 1200 when it is unset.
+ */
+export function readRateLimit(env: NodeJS.ProcessEnv): RateLimitSettings {
+  const raw = env.RATE_LIMIT_PER_MINUTE;
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_RATE_LIMIT;
+  }
+  const max = Number(raw);
+  if (!Number.isInteger(max) || max < 1) {
+    throw new Error(`RATE_LIMIT_PER_MINUTE must be a whole number of 1 or more, not ${raw}.`);
+  }
+  return { max, timeWindowMs: 60_000 };
+}
+
 export interface RunningServer {
   app: FastifyInstance;
   pool: pg.Pool;
@@ -32,7 +49,8 @@ export interface RunningServer {
 
 /**
  * Starts the server from the environment: connects as codegraph_app
- * (`DATABASE_APP_URL`), listens on `HOST`:`PORT`. `main.ts` calls this and
+ * (`DATABASE_APP_URL`), listens on `HOST`:`PORT`, and limits each caller
+ * to `RATE_LIMIT_PER_MINUTE`. `main.ts` calls this and
  * wires `shutdown` to SIGTERM and SIGINT.
  */
 export async function runServer(
@@ -41,11 +59,12 @@ export async function runServer(
 ): Promise<RunningServer> {
   const appUrl = requireEnv('DATABASE_APP_URL', env);
   const port = readPort(env);
+  const rateLimit = readRateLimit(env);
   const host = env.HOST === undefined || env.HOST.trim() === '' ? DEFAULT_HOST : env.HOST;
   const pool = createAppPool(appUrl);
   let app: FastifyInstance;
   try {
-    app = await buildApp({ pool, logger });
+    app = await buildApp({ pool, logger, rateLimit });
   } catch (error) {
     await pool.end();
     throw error;

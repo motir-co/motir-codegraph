@@ -108,11 +108,14 @@ A caller branches on `code`; the status is derived from it. The codes, as
 | `tenant_not_found`     | 404         | no such tenant (operator calls and the delete routes)                   |
 | `client_not_found`     | 404         | no such client (operator calls)                                         |
 | `route_not_found`      | 404         | no route answers the method and path                                    |
+| `rate_limited`         | 429         | the caller is over its request limit (§11); `Retry-After` says when     |
 | `internal_error`       | 500         | anything else; its message and stack never reach the caller             |
 | `service_unavailable`  | 503         | the database cannot be reached                                          |
 
 The rules:
 
+- **A caller over its request limit is 429 before anything else**, credential
+  or not (§11).
 - **The order is 401, then 403, then 404.** An unknown `/v1` path without a
   credential is 401; with one, `route_not_found`.
 - **An ungranted tenant is 403 whether or not it exists**, so a client cannot
@@ -283,8 +286,18 @@ binding statement per request, whatever the number of grants the client holds.
 The pre-launch design target for that fixed cost is about 10 ms at p95, inside
 the 200 ms read target (node, callers, callees).
 
-- Source: `src/server/auth.ts`, `src/server/binding.ts`.
-- Tests: `tests/server/query-count.test.ts` (the statement count, unchanged
+**Each caller is limited** to `RATE_LIMIT_PER_MINUTE` requests a minute (1200
+when unset) on `/v1`, by `@fastify/rate-limit`, as the plugin's first hook: a
+call over the limit is refused 429 `rate_limited`, with `Retry-After`, before
+authentication runs, so a flood of calls costs no database work. A caller is
+its `Authorization` header (held as a SHA-256 hash), or its address when it
+sends none. The counters live in each copy's memory, so behind N copies a
+caller's real ceiling is up to N times the setting: the limit is a protective
+cap, not state a call's answer depends on. `/health` is not limited.
+
+- Source: `src/server/auth.ts`, `src/server/binding.ts`, `src/server/v1.ts`
+  (the limit).
+- Tests: `tests/server/rate-limit.test.ts`, `tests/server/query-count.test.ts` (the statement count, unchanged
   with 25 more grants), `tests/server/copies.test.ts`,
   `tests/server/transaction.test.ts` (no module-level cache).
 

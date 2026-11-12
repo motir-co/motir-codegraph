@@ -115,7 +115,7 @@ describe('the README’s Try the API recipe', () => {
 
   it('names only pnpm scripts package.json has', () => {
     const scripts = packageScripts();
-    const named = [...recipe.matchAll(/\bpnpm (?:--?[a-z-]+ )*([a-z][\w:-]*)/g)]
+    const named = [...recipe.matchAll(/\bpnpm (?:--silent )?([a-z][\w:-]*)/g)]
       .map((match) => match[1] as string)
       .filter((name) => name !== 'install');
     expect(named).toEqual(

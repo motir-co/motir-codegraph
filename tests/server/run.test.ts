@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { readPort, runServer } from '../../src/server/run.js';
+import { readPort, readRateLimit, runServer } from '../../src/server/run.js';
 import { freshDatabase, type FreshDatabase } from '../helpers/db.js';
 import { call } from '../helpers/server.js';
 
@@ -29,6 +29,26 @@ describe('readPort', () => {
 
   it.each(['http', '-1', '65536', '80.5'])('refuses PORT=%s', (raw) => {
     expect(() => readPort({ PORT: raw })).toThrow(/PORT must be a port number/);
+  });
+});
+
+describe('readRateLimit', () => {
+  it('defaults to 1200 a minute and reads a valid limit', () => {
+    expect(readRateLimit({})).toEqual({ max: 1200, timeWindowMs: 60_000 });
+    expect(readRateLimit({ RATE_LIMIT_PER_MINUTE: ' ' })).toEqual({
+      max: 1200,
+      timeWindowMs: 60_000,
+    });
+    expect(readRateLimit({ RATE_LIMIT_PER_MINUTE: '30' })).toEqual({
+      max: 30,
+      timeWindowMs: 60_000,
+    });
+  });
+
+  it.each(['many', '0', '-5', '2.5'])('refuses RATE_LIMIT_PER_MINUTE=%s', (raw) => {
+    expect(() => readRateLimit({ RATE_LIMIT_PER_MINUTE: raw })).toThrow(
+      /RATE_LIMIT_PER_MINUTE must be a whole number/,
+    );
   });
 });
 

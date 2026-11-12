@@ -1,9 +1,12 @@
-import type { FastifyInstance } from 'fastify';
+import { createHash } from 'node:crypto';
+
+import rateLimit from '@fastify/rate-limit';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type pg from 'pg';
 
 import { authenticate } from './auth.js';
 import { bind, commitOrRollback, releaseRequestDb } from './binding.js';
-import { handleNotFound } from './errors.js';
+import { ApiError, handleNotFound } from './errors.js';
 import { operatorRoutes } from './operator.js';
 import { deleteRoutes } from './routes/deletes.js';
 import { statusRoutes } from './routes/status.js';
@@ -17,6 +20,29 @@ export interface V1Options {
   pool: pg.Pool;
   /** Extra route modules mounted on `/v1`, for tests only; `main.ts` passes none. */
   routes?: readonly V1Routes[];
+  /** Requests one caller may make per window; `DEFAULT_RATE_LIMIT` when unset. */
+  rateLimit?: RateLimitSettings;
+}
+
+export interface RateLimitSettings {
+  max: number;
+  timeWindowMs: number;
+}
+
+/** 1200 requests a minute per caller, per copy. */
+export const DEFAULT_RATE_LIMIT: RateLimitSettings = { max: 1200, timeWindowMs: 60_000 };
+
+/**
+ * Who a request counts against: its credential (as a hash, so no token is held
+ * in memory), or its address when it presents none. Behind a load balancer
+ * every caller shares an address, so the credential is the useful key.
+ */
+export function rateLimitKey(request: FastifyRequest): string {
+  const authorization = request.headers.authorization;
+  if (authorization === undefined || authorization === '') {
+    return `ip:${request.ip}`;
+  }
+  return `credential:${createHash('sha256').update(authorization).digest('base64url')}`;
 }
 
 /** The route modules every copy of the server serves. */
@@ -33,6 +59,20 @@ export async function v1Plugin(app: FastifyInstance, options: V1Options): Promis
   app.decorateRequest('auth', null);
   app.decorateRequest('dbState', null);
 
+  // The first hook: a caller over its limit is refused 429 before the
+  // authenticate call, so a flood costs no database work.
+  await app.register(rateLimit, { global: false });
+  const limit = options.rateLimit ?? DEFAULT_RATE_LIMIT;
+  app.addHook(
+    'onRequest',
+    app.rateLimit({
+      max: limit.max,
+      timeWindow: limit.timeWindowMs,
+      keyGenerator: rateLimitKey,
+      errorResponseBuilder: () =>
+        new ApiError('rate_limited', 'Too many requests; retry after the Retry-After seconds.'),
+    }),
+  );
   app.addHook('onRequest', authenticate(options.pool));
   app.addHook('preHandler', bind);
   app.addHook('onSend', commitOrRollback);

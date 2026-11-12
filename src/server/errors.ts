@@ -13,6 +13,7 @@ export const ERROR_STATUS = {
   tenant_not_found: 404,
   client_not_found: 404,
   route_not_found: 404,
+  rate_limited: 429,
   internal_error: 500,
   service_unavailable: 503,
 } as const;
