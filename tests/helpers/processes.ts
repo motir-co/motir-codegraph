@@ -38,10 +38,17 @@ export interface CommandResult {
   stderr: string;
 }
 
-/** Runs a script's command to completion with `env` added to the test's own. */
-export async function runScript(name: string, env: NodeJS.ProcessEnv): Promise<CommandResult> {
+/**
+ * Runs a script's command to completion with `env` added to the test's own,
+ * and `args` appended to its own arguments, as `pnpm <name> <args…>` does.
+ */
+export async function runScript(
+  name: string,
+  env: NodeJS.ProcessEnv,
+  args: readonly string[] = [],
+): Promise<CommandResult> {
   try {
-    const { stdout, stderr } = await run(process.execPath, scriptNodeArgs(name), {
+    const { stdout, stderr } = await run(process.execPath, [...scriptNodeArgs(name), ...args], {
       cwd: ROOT,
       env: { ...process.env, ...env },
     });

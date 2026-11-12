@@ -66,12 +66,14 @@ applied 0001_tenancy.sql
 applied 0002_row_level_security.sql
 applied 0003_operator_client_read.sql
 applied 0004_delete_functions.sql
+applied 0005_blob_and_contents.sql
+applied 0006_blob_fact.sql
 ```
 
 The second applies nothing:
 
 ```text
-nothing to apply (4 already applied)
+nothing to apply (6 already applied)
 ```
 
 `pnpm test` then runs the suite against the same Postgres; every test creates and
@@ -471,6 +473,17 @@ from the generated `operator-token` secret. Then switch
 starts the service on the recorded digest. Every later push to `main` deploys
 on its own.
 
+## The indexing library
+
+The per-blob layer of indexing is a library the indexing workers call on files
+they have already fetched and hashed; it answers no route. It has two entry
+points: `storeBlob` stores one file for one tenant, once, and answers its
+outcome (`indexed`, `unsupported`, `binary` or `refused`), and
+`reextractLanguage` rebuilds one language's stale blobs from their stored
+contents after its grammar or query changes. Its contract, the one setting it
+adds (`PER_FILE_CAP_BYTES`) and how to add a language are in
+[`docs/indexing-library.md`](docs/indexing-library.md).
+
 ## Where to go next
 
 Adding a table? Read [`docs/schema-contract.md`](docs/schema-contract.md): the
@@ -480,3 +493,7 @@ like the foundation tables.
 Adding a route? Read [`docs/api-contract.md`](docs/api-contract.md): the one
 authentication and binding path, the refusal codes, the status shape and the
 content access log every route follows.
+
+Indexing files, or adding a language? Read
+[`docs/indexing-library.md`](docs/indexing-library.md): the two entry points,
+the four outcomes, what a caller may rely on, and the steps for a new grammar.

@@ -3,3 +3,5 @@ dist
 coverage
 pnpm-lock.yaml
 LICENSE
+# Inputs to the extractor: their formatting and their syntax error are the point.
+fixtures/sample-tree

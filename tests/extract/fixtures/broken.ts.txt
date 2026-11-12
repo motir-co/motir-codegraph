@@ -1,0 +1,6 @@
+import { Base } from './base';
+
+export class Repo extends Base {
+  load(id: string): number {
+    return parse(id;
+  }

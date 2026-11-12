@@ -1,20 +1,69 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import type pg from 'pg';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { storeBlob } from '../../src/indexing/storeBlob.js';
 import { queryRows, sqlState, withClient } from '../helpers/db.js';
-import { inBoundTransaction, type Binding } from '../helpers/tenancy.js';
+import { asOperator, inBoundTransaction, type Binding } from '../helpers/tenancy.js';
 import { foundation, type Foundation } from './foundation.fixture.js';
 
 const RLS_VIOLATION = '42501';
 const insertLog =
   'INSERT INTO codegraph.content_access_log (tenant_id, repository_id, client_id, content_ref) VALUES ($1, $2, $3, $4)';
 
+const SAMPLE = new URL('../../fixtures/sample-tree/languages/', import.meta.url);
+const SHARED = readFileSync(new URL('typescript/shapes.ts', SAMPLE));
+const ONLY_A = readFileSync(new URL('python/shapes.py', SAMPLE));
+const ONLY_B = readFileSync(new URL('go/shapes.go', SAMPLE));
+
+function gitBlobHash(bytes: Buffer): string {
+  return createHash('sha1')
+    .update(`blob ${String(bytes.length)}\0`)
+    .update(bytes)
+    .digest('hex');
+}
+
+/** The blob tables' rows, keyed and ordered so two reads compare exactly. */
+const BLOB_READS = {
+  blobs:
+    'SELECT tenant_id, git_blob_hash, outcome FROM codegraph.blob ORDER BY tenant_id, git_blob_hash',
+  contents:
+    'SELECT tenant_id, git_blob_hash, md5(contents) AS digest FROM codegraph.blob_contents ORDER BY tenant_id, git_blob_hash',
+  facts:
+    'SELECT tenant_id, git_blob_hash, count(*)::int AS n FROM codegraph.blob_fact GROUP BY 1, 2 ORDER BY 1, 2',
+} as const;
+
 // A fresh foundation per test: the revoke cases change grants and credentials.
+// Both tenants hold stored blobs, one hash in both, stored through the shipped
+// entry point; B's by a second client granted B only, so the reader stays
+// ungranted on B.
 let f: Foundation;
 beforeEach(async () => {
   f = await foundation();
+  const writerB = (await asOperator<string>(
+    f.db.appUrl,
+    f.fx.operatorId,
+    'codegraph.codegraph_create_client($1, $2)',
+    ['writer-b', 'client'],
+  )) as string;
+  await asOperator(f.db.appUrl, f.fx.operatorId, 'codegraph.codegraph_grant_access($1, $2)', [
+    writerB,
+    f.fx.tenantB.id,
+  ]);
+  await withClient(f.db.appUrl, async (c) => {
+    const stored: [string, string, Buffer][] = [
+      [f.fx.tenantA.id, f.fx.readerId, SHARED],
+      [f.fx.tenantA.id, f.fx.readerId, ONLY_A],
+      [f.fx.tenantB.id, writerB, SHARED],
+      [f.fx.tenantB.id, writerB, ONLY_B],
+    ];
+    for (const [tenantId, clientId, bytes] of stored) {
+      const path = bytes === ONLY_A ? 'shapes.py' : bytes === ONLY_B ? 'shapes.go' : 'shapes.ts';
+      await storeBlob(c, { tenantId, clientId, gitBlobHash: gitBlobHash(bytes), path, bytes });
+    }
+  });
 });
 afterEach(async () => {
   await f.db.drop();
@@ -27,7 +76,25 @@ async function visible(c: pg.Client) {
       c,
       'SELECT id, tenant_id, display_name FROM codegraph.repositories ORDER BY id',
     ),
+    blobs: await queryRows(c, BLOB_READS.blobs),
+    contents: await queryRows(c, BLOB_READS.contents),
+    facts: await queryRows(c, BLOB_READS.facts),
   };
+}
+
+const NOTHING = { tenants: [], repositories: [], blobs: [], contents: [], facts: [] };
+
+/** One tenant's blob rows as the owner reads them, for the bound view to equal. */
+async function blobRowsOf(tenantId: string) {
+  return await withClient(f.db.ownerUrl, async (c) => {
+    const only = async (sql: string) =>
+      (await queryRows<{ tenant_id: string }>(c, sql)).filter((r) => r.tenant_id === tenantId);
+    return {
+      blobs: await only(BLOB_READS.blobs),
+      contents: await only(BLOB_READS.contents),
+      facts: await only(BLOB_READS.facts),
+    };
+  });
 }
 
 /** The whole tenant-owned population, read as the owner. */
@@ -49,6 +116,54 @@ function allRepositories() {
 
 /** Every write the app login may attempt, each of which must touch nothing. */
 async function attemptEveryWrite(c: pg.Client) {
+  const shared = gitBlobHash(SHARED);
+  for (const tenant of [f.fx.tenantA, f.fx.tenantB]) {
+    const fresh = gitBlobHash(Buffer.from(`refused ${tenant.id}`));
+    expect(
+      await sqlState(
+        c,
+        `INSERT INTO codegraph.blob (tenant_id, git_blob_hash, size_bytes, outcome) VALUES ($1, $2, 1, 'binary')`,
+        [tenant.id, fresh],
+      ),
+    ).toBe(RLS_VIOLATION);
+    expect(
+      await sqlState(
+        c,
+        'INSERT INTO codegraph.blob_contents (tenant_id, git_blob_hash, contents) VALUES ($1, $2, $3)',
+        [tenant.id, shared, 'x'],
+      ),
+    ).toBe(RLS_VIOLATION);
+    expect(
+      await sqlState(
+        c,
+        `INSERT INTO codegraph.blob_fact (tenant_id, git_blob_hash, kind, language, producer, extractor_version, name, parent_name, relation)
+         VALUES ($1, $2, 'inheritance', 'typescript', 'tree-sitter', 'v', 'A', 'B', 'extends')`,
+        [tenant.id, shared],
+      ),
+    ).toBe(RLS_VIOLATION);
+    const relabel = await c.query(
+      "UPDATE codegraph.blob SET language = 'hijacked' WHERE tenant_id = $1",
+      [tenant.id],
+    );
+    expect(relabel.rowCount).toBe(0);
+    // No UPDATE is granted on contents or facts at all.
+    expect(
+      await sqlState(c, "UPDATE codegraph.blob_contents SET contents = 'x' WHERE tenant_id = $1", [
+        tenant.id,
+      ]),
+    ).toBe(RLS_VIOLATION);
+    expect(
+      await sqlState(c, "UPDATE codegraph.blob_fact SET name = 'x' WHERE tenant_id = $1", [
+        tenant.id,
+      ]),
+    ).toBe(RLS_VIOLATION);
+    for (const table of ['blob_fact', 'blob_contents', 'blob']) {
+      const remove = await c.query(`DELETE FROM codegraph.${table} WHERE tenant_id = $1`, [
+        tenant.id,
+      ]);
+      expect(remove.rowCount, table).toBe(0);
+    }
+  }
   for (const { tenant, repository } of allRepositories()) {
     expect(await sqlState(c, insertLog, [tenant, repository, f.fx.readerId, 'refused'])).toBe(
       RLS_VIOLATION,
@@ -77,17 +192,23 @@ describe('the granted tenant', () => {
     const [web] = tenantA.repositories;
     if (web === undefined) throw new Error('fixture has no repository');
     const ref = `read-${randomUUID()}`;
+    const ownBlobs = await blobRowsOf(tenantA.id);
+    expect((await population()).blobs).toHaveLength(4);
     await withClient(f.db.appUrl, (c) =>
       inBoundTransaction(
         c,
         { clientId: readerId, tenantId: tenantA.id },
         async () => {
-          expect(await visible(c)).toEqual({
+          const view = await visible(c);
+          expect(view).toEqual({
             tenants: [{ id: tenantA.id, display_name: tenantA.name }],
             repositories: tenantA.repositories
               .map((r) => ({ id: r.id, tenant_id: tenantA.id, display_name: r.name }))
               .sort((x, y) => x.id.localeCompare(y.id)),
+            ...ownBlobs,
           });
+          // The shared hash is two rows in truth and one in this view.
+          expect(view.blobs).toHaveLength(2);
           const rename = await c.query(
             "UPDATE codegraph.repositories SET display_name = 'acme-web-renamed' WHERE id = $1",
             [web.id],
@@ -139,7 +260,7 @@ describe.each<[string, (fx: Foundation['fx']) => Binding]>([
         c,
         binding(f.fx),
         async () => {
-          expect(await visible(c)).toEqual({ tenants: [], repositories: [] });
+          expect(await visible(c)).toEqual(NOTHING);
           await attemptEveryWrite(c);
         },
         { commit: true },
@@ -164,7 +285,7 @@ describe('revocation', () => {
         },
         { commit: true },
       );
-      expect(await session(c)).toEqual({ tenants: [], repositories: [] });
+      expect(await session(c)).toEqual(NOTHING);
       const before = await population();
       await inBoundTransaction(
         c,
