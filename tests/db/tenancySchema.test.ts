@@ -127,7 +127,8 @@ describe('codegraph_app, the login the service runs as', () => {
           await c.query<{ table: string; privilege: string; allowed: boolean }>(`
         SELECT t AS table, p AS privilege, has_table_privilege('codegraph.' || t, p) AS allowed
         FROM unnest(ARRAY['tenants','repositories','clients','credentials','grants',
-                          'content_access_log','schema_migrations']) t,
+                          'content_access_log','schema_migrations',
+                          'blob','blob_contents']) t,
              unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p
         ORDER BY 1, 2`)
         ).rows,
@@ -137,6 +138,12 @@ describe('codegraph_app, the login the service runs as', () => {
       .map((row) => `${row.table}:${row.privilege}`);
     expect(allowed.sort()).toEqual(
       [
+        'blob:DELETE',
+        'blob:INSERT',
+        'blob:SELECT',
+        'blob_contents:DELETE',
+        'blob_contents:INSERT',
+        'blob_contents:SELECT',
         'content_access_log:INSERT',
         'repositories:DELETE',
         'repositories:SELECT',
@@ -157,6 +164,12 @@ describe('codegraph_app, the login the service runs as', () => {
         ).rows,
     );
     expect(columns).toEqual([
+      { table: 'blob', column: 'extractor_version' },
+      { table: 'blob', column: 'language' },
+      { table: 'blob', column: 'lossy' },
+      { table: 'blob', column: 'outcome' },
+      { table: 'blob', column: 'parsed_with_errors' },
+      { table: 'blob', column: 'refused_cap_bytes' },
       { table: 'repositories', column: 'display_name' },
       { table: 'tenants', column: 'display_name' },
     ]);

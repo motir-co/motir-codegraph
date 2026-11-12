@@ -73,7 +73,13 @@ describe('deleting a tenant', () => {
       const credentials = await queryRows(c, 'SELECT * FROM codegraph.credentials ORDER BY id');
       await c.query('DELETE FROM codegraph.tenants WHERE id = $1', [f.fx.tenantA.id]);
       const left = await rowsReferencing(c, 'tenant_id', f.fx.tenantA.id);
-      expect(Object.keys(left).sort()).toEqual(['content_access_log', 'grants', 'repositories']);
+      expect(Object.keys(left).sort()).toEqual([
+        'blob',
+        'blob_contents',
+        'content_access_log',
+        'grants',
+        'repositories',
+      ]);
       expect(Object.values(left).every((n) => n === 0)).toBe(true);
       for (const repository of f.fx.tenantA.repositories) {
         const byRepository = await rowsReferencing(c, 'repository_id', repository.id);

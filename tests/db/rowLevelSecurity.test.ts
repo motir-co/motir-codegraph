@@ -20,7 +20,13 @@ import {
 
 const RLS_VIOLATION = '42501'; // new row violates row-level security policy
 const MUST_BE_OWNER = '42501'; // Postgres reports must-be-owner as insufficient_privilege
-const TENANT_TABLES = ['tenants', 'repositories', 'content_access_log'] as const;
+const TENANT_TABLES = [
+  'tenants',
+  'repositories',
+  'content_access_log',
+  'blob',
+  'blob_contents',
+] as const;
 
 let db: FreshDatabase;
 let fx: TenancyFixture;
@@ -260,7 +266,13 @@ describe('the policy shape', () => {
         relforcerowsecurity: true,
       })),
     );
-    const column = { tenants: 'id', repositories: 'tenant_id', content_access_log: 'tenant_id' };
+    const column = {
+      tenants: 'id',
+      repositories: 'tenant_id',
+      content_access_log: 'tenant_id',
+      blob: 'tenant_id',
+      blob_contents: 'tenant_id',
+    };
     const expected = [...TENANT_TABLES].sort().flatMap((table) => {
       const bound = `(${column[table]} = ( SELECT codegraph.codegraph_bound_tenant() AS codegraph_bound_tenant))`;
       return [

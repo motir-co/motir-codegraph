@@ -195,7 +195,10 @@ describe('the functions the migrations create', () => {
            ARRAY(SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END
                    FROM aclexplode(p.proacl) a WHERE a.privilege_type = 'EXECUTE' ORDER BY 1)::text[] AS executors
       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname = 'codegraph' ORDER BY p.proname`;
+     WHERE n.nspname = 'codegraph'
+       -- An extension's own functions (pg_trgm, 0005) are its members, not the migrations'.
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+     ORDER BY p.proname`;
 
   it('are SECURITY DEFINER, owned by codegraph_owner, pinned to codegraph, pg_temp, and executable only where intended', async () => {
     const rows = await withClient(withDatabase(db.adminUrl, db.name), (c) =>
