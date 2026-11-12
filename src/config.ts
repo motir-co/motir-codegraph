@@ -33,3 +33,81 @@ export function perFileCapBytes(env: NodeJS.ProcessEnv = process.env): number {
   }
   return cap;
 }
+
+/** The depth past which a published layer is due for compaction, when unset. */
+export const DEFAULT_COMPACTION_THRESHOLD = 8;
+
+/** The depth at which a commit is written as a base, when unset. */
+export const DEFAULT_HARD_CEILING = 32;
+
+/** How long a staged layer may sit before it is discarded, when unset: two hours. */
+export const DEFAULT_STAGED_LAYER_STALENESS_MS = 7_200_000;
+
+/**
+ * The three knobs of the commit-layer library (src/indexing/layers): service
+ * configuration, read once by the process that hosts the library's calls and
+ * handed down. Never per tenant or per repository.
+ */
+export interface LayerSettings {
+  /**
+   * A layer depth (a whole number of layers above its base). A published layer
+   * deeper than this is due for compaction into a new base. Always below
+   * `hardCeiling - 1`, so compaction can fire before the ceiling forces a base.
+   */
+  readonly compactionThreshold: number;
+  /**
+   * A layer depth. A commit whose parent's chain has reached it is written as
+   * a base instead of a deeper delta, so no chain is ever longer than this.
+   */
+  readonly hardCeiling: number;
+  /**
+   * Milliseconds. A staged layer older than this was left by a dead job and is
+   * discarded, which releases the blobs it pinned. Longer than any index job.
+   */
+  readonly stagedLayerStaleness: number;
+}
+
+/** A whole number of 1 or more from `name`, or `fallback` when unset or blank. */
+function readPositiveWhole(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!/^\s*\d+\s*$/.test(raw) || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a whole number of 1 or more, not ${raw}.`);
+  }
+  return value;
+}
+
+/**
+ * `COMPACTION_THRESHOLD`, `HARD_CEILING` and `STAGED_LAYER_STALENESS_MS`, each
+ * defaulted when unset or blank (8, 32 and 7,200,000 ms). A value that is not
+ * a whole number of 1 or more is refused naming its variable. The pair is then
+ * checked over the EFFECTIVE values: no layer is deeper than the ceiling minus
+ * one (a parent at the ceiling is followed by a base) and a layer is due only
+ * when strictly deeper than the threshold, so a threshold at or above the
+ * ceiling minus one could never fire and is refused naming both.
+ *
+ * The one way to obtain these values: nothing is read at import, and there is
+ * no variant that skips the pair check.
+ */
+export function readLayerSettings(env: NodeJS.ProcessEnv = process.env): LayerSettings {
+  const compactionThreshold = readPositiveWhole(
+    env,
+    'COMPACTION_THRESHOLD',
+    DEFAULT_COMPACTION_THRESHOLD,
+  );
+  const hardCeiling = readPositiveWhole(env, 'HARD_CEILING', DEFAULT_HARD_CEILING);
+  const stagedLayerStaleness = readPositiveWhole(
+    env,
+    'STAGED_LAYER_STALENESS_MS',
+    DEFAULT_STAGED_LAYER_STALENESS_MS,
+  );
+  if (compactionThreshold >= hardCeiling - 1) {
+    throw new Error(
+      `COMPACTION_THRESHOLD (${String(compactionThreshold)}) must be below HARD_CEILING (${String(hardCeiling)}) minus one: no layer is deeper than the ceiling minus one, so compaction past this threshold could never fire.`,
+    );
+  }
+  return { compactionThreshold, hardCeiling, stagedLayerStaleness };
+}
