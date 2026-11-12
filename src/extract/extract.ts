@@ -18,5 +18,5 @@ import type { ExtractionResult, LanguageEntry } from './types.js';
  */
 export function extract(entry: LanguageEntry, source: string): ExtractionResult {
   const parsed = parseAndProject(entry, source);
-  return { facts: buildFacts(entry, parsed.matches), parsedWithErrors: parsed.hasError };
+  return { facts: buildFacts(entry, parsed.matches, source), parsedWithErrors: parsed.hasError };
 }

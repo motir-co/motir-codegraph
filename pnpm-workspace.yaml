@@ -2,8 +2,28 @@ allowBuilds:
   # vitest and tsx run TypeScript through esbuild, whose install step fetches
   # the platform binary.
   esbuild: true
-  # Tree-sitter grammar packages: their install step builds a native Node
-  # binding this service never loads. It runs grammars through web-tree-sitter
-  # and loads each package's prebuilt .wasm (docs/tree-sitter-runtime.md).
+  # Tree-sitter grammar packages: their install step builds (or fetches) a
+  # native Node binding this service never loads. It runs grammars through
+  # web-tree-sitter and loads each package's prebuilt .wasm instead
+  # (docs/tree-sitter-runtime.md), so every grammar's script stays off.
+  '@tree-sitter-grammars/tree-sitter-kotlin': false
+  '@tree-sitter-grammars/tree-sitter-lua': false
+  tree-sitter-c: false
+  tree-sitter-c-sharp: false
+  tree-sitter-cpp: false
+  tree-sitter-dart-orchard: false
+  tree-sitter-elixir: false
+  tree-sitter-go: false
+  tree-sitter-haskell: false
+  tree-sitter-java: false
   tree-sitter-javascript: false
+  tree-sitter-php: false
+  tree-sitter-python: false
+  tree-sitter-ruby: false
+  tree-sitter-rust: false
+  tree-sitter-scala: false
+  tree-sitter-solidity: false
   tree-sitter-typescript: false
+  # tree-sitter-solidity lists yarn as a runtime dependency; its install hook
+  # is not needed to load the grammar's .wasm, so it stays off too.
+  yarn: false

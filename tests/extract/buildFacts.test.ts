@@ -53,6 +53,9 @@ function span(
 
 const m = (...captures: ProjectedCapture[]): ProjectedMatch => ({ captures });
 
+const build = (matches: readonly ProjectedMatch[], source = ''): Fact[] =>
+  buildFacts(entry, matches, source);
+
 const stamp = {
   language: 'toylang',
   producer: TREE_SITTER_PRODUCER,
@@ -61,7 +64,7 @@ const stamp = {
 
 describe('buildFacts', () => {
   it('maps the four capture families to the four fact kinds, stamped', () => {
-    const facts = buildFacts(entry, [
+    const facts = build([
       m(cap('import.module', '"./base"', 0, 21, 29), cap('import.name', 'Base', 0, 9, 13)),
       m(span('definition.class', 'class Repo…', [2, 0], [6, 1]), cap('name', 'Repo', 2, 6, 10)),
       m(cap('name', 'Repo', 2, 6, 10), cap('inheritance.extends', 'Base', 2, 19, 23)),
@@ -105,7 +108,7 @@ describe('buildFacts', () => {
   });
 
   it('names the innermost enclosing definition, and none at the top level', () => {
-    const facts = buildFacts(entry, [
+    const facts = build([
       m(span('definition.class', 'class', [0, 0], [9, 1]), cap('name', 'Outer', 0, 6, 11)),
       m(span('definition.method', 'load', [1, 2], [5, 3]), cap('name', 'load', 1, 2, 6)),
       m(cap('reference.call', 'parse()', 3, 4, 11), cap('name', 'parse', 3, 4, 9)),
@@ -118,7 +121,7 @@ describe('buildFacts', () => {
   });
 
   it('does not treat a definition as enclosing itself or another node of the same span', () => {
-    const facts = buildFacts(entry, [
+    const facts = build([
       m(span('definition.class', 'x', [0, 0], [2, 1]), cap('name', 'A', 0, 6, 7)),
       m(span('definition.namespace', 'x', [0, 0], [2, 1]), cap('name', 'B', 0, 6, 7)),
     ]);
@@ -126,7 +129,7 @@ describe('buildFacts', () => {
   });
 
   it('yields no fact for a role capture whose match has no @name, and keeps the rest', () => {
-    const facts = buildFacts(entry, [
+    const facts = build([
       m(span('definition.class', 'class', [0, 0], [3, 1])),
       m(cap('reference.call', 'go()', 1, 2, 6)),
       m(cap('inheritance.implements', 'Iface', 0, 20, 25)),
@@ -138,7 +141,7 @@ describe('buildFacts', () => {
   });
 
   it('carries an unknown definition kind through verbatim and ignores unknown captures', () => {
-    const facts = buildFacts(entry, [
+    const facts = build([
       m(
         span('definition.trait', 'trait Show…', [0, 0], [2, 1]),
         cap('name', 'Show', 0, 6, 10),
@@ -154,14 +157,14 @@ describe('buildFacts', () => {
     const viaOne = m(span('definition.class', 'c', [0, 0], [1, 1]), cap('name', 'A', 0, 6, 7));
     const viaTwo = m(span('definition.class', 'c', [0, 0], [1, 1]), cap('name', 'A', 0, 6, 7));
     const otherKind = m(span('definition.struct', 'c', [0, 0], [1, 1]), cap('name', 'A', 0, 6, 7));
-    const facts = buildFacts(entry, [viaOne, viaTwo, otherKind]);
+    const facts = build([viaOne, viaTwo, otherKind]);
     // Same kind, range and name: once. definitionKind is not part of the identity.
     expect(facts).toHaveLength(1);
     expect(facts[0]).toMatchObject({ definitionKind: 'class' });
   });
 
   it('keeps two inheritances of one symbol from one node apart by relation', () => {
-    const facts = buildFacts(entry, [
+    const facts = build([
       m(cap('name', 'A', 0, 6, 7), cap('inheritance.extends', 'B', 0, 16, 17)),
       m(cap('name', 'A', 0, 6, 7), cap('inheritance.implements', 'B', 0, 16, 17)),
     ]);
@@ -176,15 +179,15 @@ describe('buildFacts', () => {
     const b = m(cap('reference.call', 'a()', 1, 0, 3), cap('name', 'a', 1, 0, 1));
     const c = m(cap('definition.function', 'f', 1, 0, 9), cap('name', 'f', 1, 0, 1));
     const d = m(cap('import.module', "'x'", 0, 5, 8));
-    const forward = buildFacts(entry, [a, b, c, d]);
-    const backward = buildFacts(entry, [d, c, b, a]);
+    const forward = build([a, b, c, d]);
+    const backward = build([d, c, b, a]);
     const names = forward.map((f) => (f.kind === 'import' ? f.moduleSpecifier : f.name));
     expect(names).toEqual(['x', 'f', 'a', 'b']);
     expect(backward).toEqual(forward);
   });
 
   it('makes one import per match, names in source order, and allows none', () => {
-    const facts = buildFacts(entry, [
+    const facts = build([
       m(
         cap('import.name', 'A', 0, 9, 10),
         cap('import.name', 'B', 0, 12, 13),
@@ -198,8 +201,46 @@ describe('buildFacts', () => {
     ]);
   });
 
+  it('merges the names of two matches that reach one import statement', () => {
+    const facts = build([
+      m(cap('import.module', "'./m'", 0, 20, 25)),
+      m(cap('import.name', 'A', 0, 9, 10), cap('import.module', "'./m'", 0, 20, 25)),
+      m(
+        cap('import.name', 'B', 0, 12, 13),
+        cap('import.name', 'A', 0, 9, 10),
+        cap('import.module', "'./m'", 0, 20, 25),
+      ),
+    ]);
+    expect(facts).toMatchObject([
+      { kind: 'import', moduleSpecifier: './m', importedNames: ['A', 'B'] },
+    ]);
+  });
+
+  it('anchors a specifier written as several nodes at their whole span, as written', () => {
+    const source = 'import a.b.C';
+    const facts = build(
+      [
+        m(
+          cap('import.module', 'a', 0, 7, 8),
+          cap('import.module', 'b', 0, 9, 10),
+          cap('import.module', 'C', 0, 11, 12),
+          cap('import.name', 'C', 0, 11, 12),
+        ),
+      ],
+      source,
+    );
+    expect(facts).toMatchObject([
+      {
+        kind: 'import',
+        moduleSpecifier: 'a.b.C',
+        importedNames: ['C'],
+        range: { startLine: 1, startColumn: 8, endLine: 1, endColumn: 13 },
+      },
+    ]);
+  });
+
   it('drops a fact whose name is only whitespace', () => {
-    const facts = buildFacts(entry, [
+    const facts = build([
       m(cap('definition.class', 'c', 0, 0, 5), cap('name', ' ', 0, 1, 2)),
       m(cap('name', 'A', 1, 0, 1), cap('inheritance.extends', ' ', 1, 5, 6)),
       m(cap('import.module', '""', 2, 0, 2)),
@@ -208,7 +249,7 @@ describe('buildFacts', () => {
   });
 
   it('returns nothing for no matches', () => {
-    expect(buildFacts(entry, [])).toEqual([]);
+    expect(build([])).toEqual([]);
   });
 });
 

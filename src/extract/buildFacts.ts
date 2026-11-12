@@ -59,8 +59,31 @@ export function stripQuotes(text: string): string {
   return text;
 }
 
+/**
+ * The node an import is anchored at. A specifier written as one node is that
+ * node; one written as several (a Scala path `a.b.C` is three identifiers) is
+ * the span from the first to the last, read from the source as written.
+ */
+function moduleNode(modules: readonly ProjectedCapture[], source: string): ProjectedCapture {
+  const [first] = modules;
+  if (first === undefined) throw new Error('moduleNode needs at least one capture.');
+  let last = first;
+  for (const capture of modules) {
+    if (capture.endIndex > last.endIndex) last = capture;
+  }
+  if (last === first) return first;
+  return {
+    name: first.name,
+    text: source.slice(first.startIndex, last.endIndex),
+    startIndex: first.startIndex,
+    endIndex: last.endIndex,
+    startPoint: first.startPoint,
+    endPoint: last.endPoint,
+  };
+}
+
 /** The facts one match yields; none when its role capture has no `@name` to name it. */
-function draftsOf(match: ProjectedMatch): Located[] {
+function draftsOf(match: ProjectedMatch, source: string): Located[] {
   let name: string | undefined;
   for (const capture of match.captures) {
     if (parseCaptureName(capture.name).role === 'name') {
@@ -69,7 +92,7 @@ function draftsOf(match: ProjectedMatch): Located[] {
     }
   }
   const out: Located[] = [];
-  let importModule: ProjectedCapture | undefined;
+  const importModules: ProjectedCapture[] = [];
   const importedNames: string[] = [];
   for (const capture of match.captures) {
     const role = parseCaptureName(capture.name);
@@ -96,20 +119,21 @@ function draftsOf(match: ProjectedMatch): Located[] {
         }
         break;
       case 'importModule':
-        importModule ??= capture;
+        importModules.push(capture);
         break;
       case 'importName':
-        importedNames.push(capture.text);
+        if (!importedNames.includes(capture.text)) importedNames.push(capture.text);
         break;
       case 'name':
       case 'ignored':
         break;
     }
   }
-  if (importModule !== undefined) {
+  if (importModules.length > 0) {
+    const node = moduleNode(importModules, source);
     out.push({
-      draft: { kind: 'import', moduleSpecifier: stripQuotes(importModule.text), importedNames },
-      node: importModule,
+      draft: { kind: 'import', moduleSpecifier: stripQuotes(node.text), importedNames },
+      node,
     });
   }
   // A name with nothing to say (whitespace only) is no fact, matching the
@@ -153,21 +177,36 @@ const KIND_ORDER: Record<FactKind, number> = {
  * - each role capture is one fact; a definition, reference or inheritance
  *   takes its name from the first `@name` in its own match, and yields no fact
  *   without one;
- * - an import is one fact per match, anchored at its module specifier;
+ * - an import is one fact per match, anchored at its module specifier — the
+ *   span of every `@import.module` in the match when it has several;
  * - every fact strictly inside a definition's node takes the innermost such
  *   definition's name as its enclosing name;
  * - facts equal in kind, range and identifying name are kept once (the first);
+ *   two imports of one specifier at one node are one import, carrying the
+ *   names of both in first-seen order, so a query may reach a statement's
+ *   names through several patterns;
  * - order is start offset, then kind, then identifying name.
  */
-export function buildFacts(entry: LanguageEntry, matches: readonly ProjectedMatch[]): Fact[] {
-  const located = matches.flatMap(draftsOf);
+export function buildFacts(
+  entry: LanguageEntry,
+  matches: readonly ProjectedMatch[],
+  source: string,
+): Fact[] {
+  const located = matches.flatMap((match) => draftsOf(match, source));
 
-  const seen = new Set<string>();
-  const unique = located.filter(({ draft, node }) => {
+  const seen = new Map<string, Located>();
+  const unique = located.filter((item) => {
+    const { draft, node } = item;
     const key = `${draft.kind}\u0000${String(node.startIndex)}\u0000${String(node.endIndex)}\u0000${identifyingName(draft)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+    const kept = seen.get(key);
+    if (kept === undefined) {
+      seen.set(key, item);
+      return true;
+    }
+    if (kept.draft.kind === 'import' && draft.kind === 'import') {
+      mergeNames(kept.draft.importedNames, draft.importedNames);
+    }
+    return false;
   });
 
   const definitions = unique.filter(({ draft }) => draft.kind === 'definition');
@@ -207,6 +246,14 @@ export function buildFacts(entry: LanguageEntry, matches: readonly ProjectedMatc
     range: toSourceRange(item.node),
     enclosingName: enclosingOf(item),
   }));
+}
+
+/** Appends the names `from` carries that `into` does not, keeping first-seen order. */
+function mergeNames(into: readonly string[], from: readonly string[]): void {
+  const target = into as string[];
+  for (const name of from) {
+    if (!target.includes(name)) target.push(name);
+  }
 }
 
 /** A locale-independent string order, so two machines order facts alike. */
