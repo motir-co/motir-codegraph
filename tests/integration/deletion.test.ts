@@ -76,6 +76,7 @@ describe('deleting a tenant', () => {
       expect(Object.keys(left).sort()).toEqual([
         'blob',
         'blob_contents',
+        'blob_fact',
         'content_access_log',
         'grants',
         'repositories',

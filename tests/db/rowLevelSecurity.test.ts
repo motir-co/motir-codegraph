@@ -26,6 +26,7 @@ const TENANT_TABLES = [
   'content_access_log',
   'blob',
   'blob_contents',
+  'blob_fact',
 ] as const;
 
 let db: FreshDatabase;
@@ -272,6 +273,7 @@ describe('the policy shape', () => {
       content_access_log: 'tenant_id',
       blob: 'tenant_id',
       blob_contents: 'tenant_id',
+      blob_fact: 'tenant_id',
     };
     const expected = [...TENANT_TABLES].sort().flatMap((table) => {
       const bound = `(${column[table]} = ( SELECT codegraph.codegraph_bound_tenant() AS codegraph_bound_tenant))`;

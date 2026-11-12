@@ -128,7 +128,7 @@ describe('codegraph_app, the login the service runs as', () => {
         SELECT t AS table, p AS privilege, has_table_privilege('codegraph.' || t, p) AS allowed
         FROM unnest(ARRAY['tenants','repositories','clients','credentials','grants',
                           'content_access_log','schema_migrations',
-                          'blob','blob_contents']) t,
+                          'blob','blob_contents','blob_fact']) t,
              unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p
         ORDER BY 1, 2`)
         ).rows,
@@ -144,6 +144,9 @@ describe('codegraph_app, the login the service runs as', () => {
         'blob_contents:DELETE',
         'blob_contents:INSERT',
         'blob_contents:SELECT',
+        'blob_fact:DELETE',
+        'blob_fact:INSERT',
+        'blob_fact:SELECT',
         'content_access_log:INSERT',
         'repositories:DELETE',
         'repositories:SELECT',
