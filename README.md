@@ -208,6 +208,45 @@ DELETE 1
 (1 row)
 ```
 
+## Run the server
+
+The HTTP server is the only way into the service: every route sits under `/v1`,
+except `GET /health`, which the load balancer calls and needs no credential.
+The server connects as `codegraph_app` (`DATABASE_APP_URL`) and keeps no state
+between requests, so any number of copies can run against one database.
+
+With the database brought up above (Postgres running, `pnpm db:bootstrap` and
+`pnpm db:migrate` done), start it:
+
+```sh
+pnpm serve
+```
+
+It listens on `PORT` (8080 in `.env.example`, and when `PORT` is unset). In
+another shell:
+
+```sh
+curl -i http://localhost:8080/health
+```
+
+```text
+HTTP/1.1 200 OK
+cache-control: no-store
+content-type: application/json; charset=utf-8
+
+{"status":"ok","process":{"up":true,"uptimeSeconds":4},"database":{"up":true}}
+```
+
+When the database cannot be reached, the same call answers `503` with
+`"status":"unavailable"` and `"database":{"up":false}` within a few seconds.
+Every error the server answers carries one body,
+`{"error":{"code":"…","message":"…"}}`; an unknown path answers `404`
+`route_not_found`.
+
+`pnpm build` compiles the server to `dist/`, and `pnpm start` runs the compiled
+`dist/server/main.js`. `SIGTERM` or `SIGINT` closes the listener, letting
+in-flight requests finish, and then the database pool.
+
 ## Where to go next
 
 Adding a table? Read [`docs/schema-contract.md`](docs/schema-contract.md): the

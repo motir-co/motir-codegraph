@@ -1,0 +1,98 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
+
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { readPort, runServer } from '../../src/server/run.js';
+import { freshDatabase, type FreshDatabase } from '../helpers/db.js';
+import { call } from '../helpers/server.js';
+
+const ROOT = fileURLToPath(new URL('../..', import.meta.url));
+
+let db: FreshDatabase;
+
+beforeAll(async () => {
+  db = await freshDatabase();
+});
+
+afterAll(async () => {
+  await db.drop();
+});
+
+describe('readPort', () => {
+  it('defaults to 8080 and reads a valid port', () => {
+    expect(readPort({})).toBe(8080);
+    expect(readPort({ PORT: ' ' })).toBe(8080);
+    expect(readPort({ PORT: '9001' })).toBe(9001);
+  });
+
+  it.each(['http', '-1', '65536', '80.5'])('refuses PORT=%s', (raw) => {
+    expect(() => readPort({ PORT: raw })).toThrow(/PORT must be a port number/);
+  });
+});
+
+describe('runServer', () => {
+  it('needs DATABASE_APP_URL', async () => {
+    await expect(runServer({}, false)).rejects.toThrow(/DATABASE_APP_URL is not set/);
+  });
+
+  it('listens, answers, and on shutdown closes the listener and then the pool', async () => {
+    const server = await runServer(
+      { DATABASE_APP_URL: db.appUrl, PORT: '0', HOST: '127.0.0.1' },
+      false,
+    );
+    expect(server.address).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect((await call(server.address, '/health')).status).toBe(200);
+
+    await Promise.all([server.shutdown(), server.shutdown()]);
+    expect(server.app.server.listening).toBe(false);
+    expect(server.pool.ended).toBe(true);
+    await expect(call(server.address, '/health')).rejects.toThrow();
+  });
+
+  it('binds 0.0.0.0 when HOST is unset', async () => {
+    const server = await runServer({ DATABASE_APP_URL: db.appUrl, PORT: '0' }, false);
+    try {
+      expect(server.address).toMatch(/:\d+$/);
+      expect(server.app.server.address()).toMatchObject({ address: '0.0.0.0' });
+    } finally {
+      await server.shutdown();
+    }
+  });
+});
+
+describe('the entry point as a process', () => {
+  it('starts, answers /health, and exits 0 on SIGTERM after closing the listener then the pool', async () => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/server/main.ts'], {
+      cwd: ROOT,
+      env: { ...process.env, DATABASE_APP_URL: db.appUrl, PORT: '0', HOST: '127.0.0.1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    const address = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`server did not start:\n${output}`));
+      }, 20_000);
+      child.stdout.on('data', () => {
+        const match = /Server listening at (http:\/\/127\.0\.0\.1:\d+)/.exec(output);
+        if (match?.[1] !== undefined) {
+          clearTimeout(timer);
+          resolve(match[1]);
+        }
+      });
+    });
+    expect((await call(address, '/health')).status).toBe(200);
+
+    child.kill('SIGTERM');
+    const [code] = (await once(child, 'exit')) as [number | null];
+    expect(code).toBe(0);
+    expect(output).toContain('closing the listener, then the pool');
+  }, 30_000);
+});
