@@ -286,18 +286,48 @@ binding statement per request, whatever the number of grants the client holds.
 The pre-launch design target for that fixed cost is about 10 ms at p95, inside
 the 200 ms read target (node, callers, callees).
 
-**Each caller is limited** to `RATE_LIMIT_PER_MINUTE` requests a minute (1200
-when unset) on `/v1`, by `@fastify/rate-limit`, as the plugin's first hook: a
-call over the limit is refused 429 `rate_limited`, with `Retry-After`, before
-authentication runs, so a flood of calls costs no database work. A caller is
-its `Authorization` header (held as a SHA-256 hash), or its address when it
-sends none. The counters live in each copy's memory, so behind N copies a
-caller's real ceiling is up to N times the setting: the limit is a protective
-cap, not state a call's answer depends on. `/health` is not limited.
+Two limits on `/v1` refuse a call 429 `rate_limited`, with `Retry-After`,
+before authentication runs, and neither applies to `/health`. Both are
+`@fastify/rate-limit` counters in each copy's memory, so behind N copies a
+caller's real ceiling is up to N times the setting: they are protective caps,
+not state a call's answer depends on.
+
+- **Per caller.** Each caller may make `RATE_LIMIT_PER_MINUTE` requests a
+  minute (1200 when unset). A caller is its `Authorization` header (held as a
+  SHA-256 hash), or its address when it sends none. This is the plugin's first
+  hook, so a flood that reuses one credential takes no connection and runs no
+  statement. It does **not** stop a caller who sends a new made-up credential
+  on every request: each one is a new caller.
+- **Failed authentications, per address.** An address may make
+  `FAILED_AUTH_LIMIT_PER_MINUTE` attempts a minute (60 when unset) with a
+  credential that has not authenticated on this copy within the last minute.
+  Each such request is counted before it authenticates, so concurrent requests
+  cannot overshoot the limit, and one over it is refused before the
+  `codegraph_authenticate()` call: it takes no connection and runs no
+  statement. A credential that authenticates is remembered and passes
+  uncounted while it keeps succeeding, so in practice the count is the
+  address's failures plus one for each credential's first success. That is
+  what keeps a working caller served while another caller at the same address
+  floods made-up tokens; a remembered credential that then fails is forgotten.
+  A missing or malformed credential counts too. A caller whose credential has
+  not authenticated yet is refused with the flood when they share an address.
+
+The client address is the TCP peer unless the peer is a proxy named in
+`TRUST_PROXY` (comma-separated addresses and CIDR ranges: the load balancer's
+subnets), whose `X-Forwarded-For` is then read. Unset, every caller behind a
+load balancer shares its address, so the failed-authentication limit is one
+bucket per copy for every caller that has not authenticated. A hop count is
+not accepted, since it cannot tell a proxy from a caller that writes its own
+`X-Forwarded-For`.
+
+So the database work a flood of made-up credentials can cause is bounded per
+copy: at most `FAILED_AUTH_LIMIT_PER_MINUTE` `codegraph_authenticate()` calls
+per address per minute, however many requests arrive at once.
 
 - Source: `src/server/auth.ts`, `src/server/binding.ts`, `src/server/v1.ts`
-  (the limit).
-- Tests: `tests/server/rate-limit.test.ts`, `tests/server/query-count.test.ts` (the statement count, unchanged
+  (both limits), `src/server/authLimit.ts` (the failed-authentication limit),
+  `src/server/run.ts` (the settings).
+- Tests: `tests/server/rate-limit.test.ts`, `tests/server/authLimit.test.ts`, `tests/server/query-count.test.ts` (the statement count, unchanged
   with 25 more grants), `tests/server/copies.test.ts`,
   `tests/server/transaction.test.ts` (no module-level cache).
 

@@ -1,10 +1,17 @@
+import { randomBytes } from 'node:crypto';
+
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { DEFAULT_RATE_LIMIT } from '../../src/server/v1.js';
+import { DEFAULT_FAILED_AUTH_LIMIT, DEFAULT_RATE_LIMIT } from '../../src/server/v1.js';
 import { freshDatabase, type FreshDatabase } from '../helpers/db.js';
 import { recordQueries } from '../helpers/queryLog.js';
-import { call, startServer, type ServerCopy } from '../helpers/server.js';
-import { buildTenancyFixture, type TenancyFixture } from '../helpers/tenancy.js';
+import { call, type CopyOptions, startServer, type ServerCopy } from '../helpers/server.js';
+import {
+  asOperator,
+  buildTenancyFixture,
+  newToken,
+  type TenancyFixture,
+} from '../helpers/tenancy.js';
 
 const LIMIT = 3;
 const RATE_LIMITED = {
@@ -94,5 +101,186 @@ describe('the /v1 rate limit', () => {
 
   it('defaults to 1200 a minute', () => {
     expect(DEFAULT_RATE_LIMIT).toEqual({ max: 1200, timeWindowMs: 60_000 });
+  });
+});
+
+/** A token nobody issued: a new one on every call, as a flood would send. */
+const madeUp = () => randomBytes(24).toString('base64url');
+
+const FAILED_LIMIT = 3;
+
+/** A copy whose per-caller limit is out of the way, so only failures count. */
+async function withCopy(
+  options: CopyOptions,
+  test: (copy: ServerCopy) => Promise<void>,
+): Promise<void> {
+  const copy = await startServer(db.appUrl, {
+    rateLimit: { max: 1000, timeWindowMs: 60_000 },
+    failedAuthLimit: { max: FAILED_LIMIT, timeWindowMs: 60_000 },
+    ...options,
+  });
+  try {
+    await test(copy);
+  } finally {
+    await copy.stop();
+  }
+}
+
+describe('the /v1 failed-authentication limit', () => {
+  it('refuses a new made-up token on every request 429 once the address has failed its limit, running no statement', async () => {
+    await withCopy({}, async (copy) => {
+      for (let i = 0; i < FAILED_LIMIT; i += 1) {
+        expect((await call(copy.baseUrl, statusPath(), { token: madeUp() })).status).toBe(401);
+      }
+      const log = recordQueries(copy.pool);
+      for (let i = 0; i < 5; i += 1) {
+        const refused = await call(copy.baseUrl, statusPath(), { token: madeUp() });
+        expect(refused.status).toBe(429);
+        expect(refused.body).toEqual(RATE_LIMITED);
+        expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(0);
+        expect(refused.headers.get('content-type')).toMatch(/^application\/json/);
+      }
+      expect(log.texts()).toEqual([]);
+    });
+  });
+
+  it('counts a missing or malformed credential as a failure too', async () => {
+    await withCopy({}, async (copy) => {
+      expect((await call(copy.baseUrl, statusPath())).status).toBe(401);
+      const basic = { headers: { authorization: `Basic ${madeUp()}` } };
+      expect((await call(copy.baseUrl, statusPath(), basic)).status).toBe(401);
+      expect((await call(copy.baseUrl, statusPath(), { token: madeUp() })).status).toBe(401);
+      expect((await call(copy.baseUrl, statusPath(), { token: madeUp() })).status).toBe(429);
+    });
+  });
+
+  it("spends one attempt on a credential's first success, and none once it is remembered", async () => {
+    await withCopy({}, async (copy) => {
+      for (let i = 0; i < FAILED_LIMIT + 3; i += 1) {
+        expect(
+          (await call(copy.baseUrl, statusPath(), { token: fixture.readerToken })).status,
+        ).toBe(200);
+      }
+      for (let i = 0; i < FAILED_LIMIT - 1; i += 1) {
+        expect((await call(copy.baseUrl, statusPath(), { token: madeUp() })).status).toBe(401);
+      }
+      expect((await call(copy.baseUrl, statusPath(), { token: madeUp() })).status).toBe(429);
+    });
+  });
+
+  it('does not let concurrent made-up tokens overshoot the limit', async () => {
+    await withCopy({}, async (copy) => {
+      const log = recordQueries(copy.pool);
+      const statuses = (
+        await Promise.all(
+          Array.from({ length: 20 }, () => call(copy.baseUrl, statusPath(), { token: madeUp() })),
+        )
+      ).map(({ status }) => status);
+      expect(statuses.filter((status) => status === 401)).toHaveLength(FAILED_LIMIT);
+      expect(statuses.filter((status) => status === 429)).toHaveLength(20 - FAILED_LIMIT);
+      expect(log.texts().filter((text) => text.includes('codegraph_authenticate'))).toHaveLength(
+        FAILED_LIMIT,
+      );
+    });
+  });
+
+  it('still serves a credential that has authenticated, from the same address, and counts it per credential', async () => {
+    await withCopy({ rateLimit: { max: 4, timeWindowMs: 60_000 } }, async (copy) => {
+      expect((await call(copy.baseUrl, statusPath(), { token: fixture.readerToken })).status).toBe(
+        200,
+      );
+      for (let i = 0; i < FAILED_LIMIT + 2; i += 1) {
+        await call(copy.baseUrl, statusPath(), { token: madeUp() });
+      }
+      // The flood's address is over its limit; the reader's credential is not.
+      for (let i = 0; i < 3; i += 1) {
+        expect(
+          (await call(copy.baseUrl, statusPath(), { token: fixture.readerToken })).status,
+        ).toBe(200);
+      }
+      // Its own per-credential limit (4) still holds.
+      expect((await call(copy.baseUrl, statusPath(), { token: fixture.readerToken })).status).toBe(
+        429,
+      );
+    });
+  });
+
+  it('refuses a credential that has not yet authenticated from an address over its limit', async () => {
+    await withCopy({}, async (copy) => {
+      for (let i = 0; i < FAILED_LIMIT; i += 1) {
+        await call(copy.baseUrl, statusPath(), { token: madeUp() });
+      }
+      const log = recordQueries(copy.pool);
+      const refused = await call(copy.baseUrl, statusPath(), { token: fixture.operatorToken });
+      expect(refused.status).toBe(429);
+      expect(log.texts()).toEqual([]);
+    });
+  });
+
+  it('forgets a credential once it fails, so a revoked one is held to the limit again', async () => {
+    await withCopy({}, async (copy) => {
+      const { token, hash } = newToken();
+      const credentialId = await asOperator<string>(
+        db.appUrl,
+        fixture.operatorId,
+        "codegraph.codegraph_issue_credential($1, $2, 'cg_rl')",
+        [fixture.readerId, hash],
+      );
+      expect((await call(copy.baseUrl, statusPath(), { token })).status).toBe(200);
+      await asOperator(db.appUrl, fixture.operatorId, 'codegraph.codegraph_revoke_credential($1)', [
+        credentialId,
+      ]);
+      // Its first success spent one attempt. Its first failure is still
+      // remembered, so passes uncounted, and forgets it; each failure after
+      // that spends one.
+      for (let i = 0; i < FAILED_LIMIT; i += 1) {
+        expect((await call(copy.baseUrl, statusPath(), { token })).status).toBe(401);
+      }
+      const log = recordQueries(copy.pool);
+      expect((await call(copy.baseUrl, statusPath(), { token })).status).toBe(429);
+      expect(log.texts()).toEqual([]);
+    });
+  });
+
+  describe('behind a trusted proxy', () => {
+    const from = (address: string, token: string) => ({
+      token,
+      headers: { 'x-forwarded-for': address },
+    });
+
+    it("counts each client address on its own, so one client's flood does not refuse another", async () => {
+      await withCopy({ trustProxy: ['127.0.0.1'] }, async (copy) => {
+        for (let i = 0; i < FAILED_LIMIT; i += 1) {
+          await call(copy.baseUrl, statusPath(), from('203.0.113.7', madeUp()));
+        }
+        expect((await call(copy.baseUrl, statusPath(), from('203.0.113.7', madeUp()))).status).toBe(
+          429,
+        );
+        // A client that has never authenticated, at another address, is
+        // authenticated (the operator may not read status: 403, not 429).
+        const other = await call(
+          copy.baseUrl,
+          statusPath(),
+          from('198.51.100.20', fixture.operatorToken),
+        );
+        expect(other.status).toBe(403);
+      });
+    });
+
+    it('ignores X-Forwarded-For from a peer it does not trust', async () => {
+      await withCopy({ trustProxy: ['192.0.2.1'] }, async (copy) => {
+        for (let i = 0; i < FAILED_LIMIT; i += 1) {
+          await call(copy.baseUrl, statusPath(), from(`203.0.113.${String(i)}`, madeUp()));
+        }
+        // A new forwarded address each time does not buy a new allowance.
+        expect(
+          (await call(copy.baseUrl, statusPath(), from('203.0.113.99', madeUp()))).status,
+        ).toBe(429);
+      });
+    });
+  });
+
+  it('defaults to 60 failures a minute', () => {
+    expect(DEFAULT_FAILED_AUTH_LIMIT).toEqual({ max: 60, timeWindowMs: 60_000 });
   });
 });

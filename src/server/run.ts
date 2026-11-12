@@ -1,10 +1,12 @@
+import { isIP } from 'node:net';
+
 import type { FastifyInstance, FastifyServerOptions } from 'fastify';
 import type pg from 'pg';
 
 import { requireEnv } from '../config.js';
 import { buildApp } from './app.js';
 import { createAppPool } from './pool.js';
-import { DEFAULT_RATE_LIMIT, type RateLimitSettings } from './v1.js';
+import { DEFAULT_FAILED_AUTH_LIMIT, DEFAULT_RATE_LIMIT, type RateLimitSettings } from './v1.js';
 
 export const DEFAULT_PORT = 8080;
 export const DEFAULT_HOST = '0.0.0.0';
@@ -22,20 +24,77 @@ export function readPort(env: NodeJS.ProcessEnv): number {
   return port;
 }
 
+/** A per-minute limit from `name`, or `fallback` when it is unset. */
+function readPerMinute(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: RateLimitSettings,
+): RateLimitSettings {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') {
+    return fallback;
+  }
+  const max = Number(raw);
+  if (!Number.isInteger(max) || max < 1) {
+    throw new Error(`${name} must be a whole number of 1 or more, not ${raw}.`);
+  }
+  return { max, timeWindowMs: 60_000 };
+}
+
 /**
  * `RATE_LIMIT_PER_MINUTE`, the requests one caller may make to `/v1` per
  * minute on one copy; 1200 when it is unset.
  */
 export function readRateLimit(env: NodeJS.ProcessEnv): RateLimitSettings {
-  const raw = env.RATE_LIMIT_PER_MINUTE;
+  return readPerMinute(env, 'RATE_LIMIT_PER_MINUTE', DEFAULT_RATE_LIMIT);
+}
+
+/**
+ * `FAILED_AUTH_LIMIT_PER_MINUTE`, the failed authentications one client
+ * address may make to `/v1` per minute on one copy; 60 when it is unset.
+ */
+export function readFailedAuthLimit(env: NodeJS.ProcessEnv): RateLimitSettings {
+  return readPerMinute(env, 'FAILED_AUTH_LIMIT_PER_MINUTE', DEFAULT_FAILED_AUTH_LIMIT);
+}
+
+/** The names `proxy-addr` accepts for its preset ranges. */
+const PROXY_RANGE_NAMES: readonly string[] = ['loopback', 'linklocal', 'uniquelocal'];
+
+function isProxyAddress(entry: string): boolean {
+  if (PROXY_RANGE_NAMES.includes(entry)) {
+    return true;
+  }
+  const [address = '', prefix, ...rest] = entry.split('/');
+  const family = isIP(address);
+  if (family === 0 || rest.length > 0) {
+    return false;
+  }
+  if (prefix === undefined) {
+    return true;
+  }
+  const bits = Number(prefix);
+  return /^\d+$/.test(prefix) && bits <= (family === 4 ? 32 : 128);
+}
+
+/**
+ * `TRUST_PROXY`, the comma-separated addresses and CIDR ranges of the proxies
+ * in front of the server (the load balancer's subnets) whose
+ * `X-Forwarded-For` is believed, so `request.ip`, which the
+ * failed-authentication limit counts by, is the real client. Unset trusts
+ * none, and every caller behind a proxy then shares its address.
+ */
+export function readTrustProxy(env: NodeJS.ProcessEnv): readonly string[] {
+  const raw = env.TRUST_PROXY;
   if (raw === undefined || raw.trim() === '') {
-    return DEFAULT_RATE_LIMIT;
+    return [];
   }
-  const max = Number(raw);
-  if (!Number.isInteger(max) || max < 1) {
-    throw new Error(`RATE_LIMIT_PER_MINUTE must be a whole number of 1 or more, not ${raw}.`);
+  const entries = raw.split(',').map((entry) => entry.trim());
+  if (!entries.every(isProxyAddress)) {
+    throw new Error(
+      `TRUST_PROXY must be a comma-separated list of proxy addresses and CIDR ranges, not ${raw}.`,
+    );
   }
-  return { max, timeWindowMs: 60_000 };
+  return entries;
 }
 
 export interface RunningServer {
@@ -49,8 +108,9 @@ export interface RunningServer {
 
 /**
  * Starts the server from the environment: connects as codegraph_app
- * (`DATABASE_APP_URL`), listens on `HOST`:`PORT`, and limits each caller
- * to `RATE_LIMIT_PER_MINUTE`. `main.ts` calls this and
+ * (`DATABASE_APP_URL`), listens on `HOST`:`PORT`, limits each caller to
+ * `RATE_LIMIT_PER_MINUTE` and each address to `FAILED_AUTH_LIMIT_PER_MINUTE`
+ * failed authentications, reading addresses through `TRUST_PROXY`. `main.ts` calls this and
  * wires `shutdown` to SIGTERM and SIGINT.
  */
 export async function runServer(
@@ -60,11 +120,13 @@ export async function runServer(
   const appUrl = requireEnv('DATABASE_APP_URL', env);
   const port = readPort(env);
   const rateLimit = readRateLimit(env);
+  const failedAuthLimit = readFailedAuthLimit(env);
+  const trustProxy = readTrustProxy(env);
   const host = env.HOST === undefined || env.HOST.trim() === '' ? DEFAULT_HOST : env.HOST;
   const pool = createAppPool(appUrl);
   let app: FastifyInstance;
   try {
-    app = await buildApp({ pool, logger, rateLimit });
+    app = await buildApp({ pool, logger, rateLimit, failedAuthLimit, trustProxy });
   } catch (error) {
     await pool.end();
     throw error;
