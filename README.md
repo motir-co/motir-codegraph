@@ -64,12 +64,13 @@ in filename order, each in its own transaction, as `codegraph_owner`:
 ```text
 applied 0001_tenancy.sql
 applied 0002_row_level_security.sql
+applied 0003_operator_client_read.sql
 ```
 
 The second applies nothing:
 
 ```text
-nothing to apply (2 already applied)
+nothing to apply (3 already applied)
 ```
 
 `pnpm test` then runs the suite against the same Postgres; every test creates and
@@ -246,6 +247,36 @@ Every error the server answers carries one body,
 `pnpm build` compiles the server to `dist/`, and `pnpm start` runs the compiled
 `dist/server/main.js`. `SIGTERM` or `SIGINT` closes the listener, letting
 in-flight requests finish, and then the database pool.
+
+## Bootstrap an operator
+
+Every `/v1` call needs a credential the service issued, and only an operator
+can issue one, so the first operator is made by a command run with the owner
+login (`DATABASE_URL`) rather than through the API:
+
+```sh
+pnpm operator:bootstrap
+```
+
+It prints the new operator's token, once, on stdout (a line on stderr names the
+client and the token's display prefix). Only the token's SHA-256 is stored, so
+it cannot be shown again: keep it. The command refuses, prints no token and
+exits 1 once any operator exists; later operators are created with
+`POST /v1/operator/clients` and `"kind": "operator"`.
+
+With the server running (`pnpm serve`), use the token for an operator call:
+
+```sh
+export OPERATOR_TOKEN=<the printed token>
+curl -s -X POST http://localhost:8080/v1/operator/tenants \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"displayName":"Acme"}'
+```
+
+```text
+{"tenantId":"6f1c2c0e-3a4b-4f7d-9c55-0b8f2f0e7a11"}
+```
 
 ## Where to go next
 

@@ -111,6 +111,13 @@ A function that writes on an operator's behalf calls
 `codegraph.codegraph_require_operator()` first, as the foundation's operator
 functions do.
 
+`codegraph_app` holds no privilege on `clients` or `credentials`. The one read
+of them open to it is `codegraph.codegraph_get_client(id)` (migration
+0003), an operator-only definer function that returns the client and each of
+its credentials' id, display prefix and times. It returns **no token and no
+token hash**: a token is shown once, in the answer that issues it, and the
+database never holds it in readable form.
+
 ## 7. Migrations
 
 A schema change is one new plain-SQL file under [`db/migrations/`](../db/migrations),

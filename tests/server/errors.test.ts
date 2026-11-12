@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { requestDb } from '../../src/server/binding.js';
 import { ApiError, ERROR_STATUS, type ErrorCode } from '../../src/server/errors.js';
 import type { V1Routes } from '../../src/server/v1.js';
 import { freshDatabase, type FreshDatabase } from '../helpers/db.js';
@@ -23,7 +24,22 @@ const throwing: V1Routes = (v1) => {
   v1.get('/crash', () => {
     throw new Error('secret detail from deep inside');
   });
+  // Database errors raised on the request transaction, by SQLSTATE.
+  v1.get<{ Params: { name: keyof typeof DATABASE_ERRORS } }>('/db-error/:name', async (request) => {
+    await requestDb(request).query(DATABASE_ERRORS[request.params.name]);
+    return { reached: true };
+  });
 };
+
+const DATABASE_ERRORS = {
+  invalidText: "SELECT 'not-a-uuid'::uuid",
+  knownForeignKey:
+    "DO $$ BEGIN RAISE foreign_key_violation USING CONSTRAINT = 'grants_client_id_fkey'; END $$",
+  unknownForeignKey:
+    "DO $$ BEGIN RAISE foreign_key_violation USING CONSTRAINT = 'elsewhere_fkey'; END $$",
+  bareForeignKey: 'DO $$ BEGIN RAISE foreign_key_violation; END $$',
+  otherState: 'SELECT 1 / 0',
+} as const;
 
 let db: FreshDatabase;
 let server: ServerCopy;
@@ -66,5 +82,29 @@ describe('the one error body', () => {
 
   it('gives ApiError the status its code maps to', () => {
     expect(new ApiError('tenant_not_found', 'gone').statusCode).toBe(404);
+  });
+});
+
+describe('database errors', () => {
+  const INTERNAL = {
+    error: { code: 'internal_error', message: 'The server could not complete the request.' },
+  };
+
+  it.each([
+    [
+      'invalidText',
+      400,
+      { error: { code: 'invalid_request', message: 'The request is not valid.' } },
+    ],
+    ['knownForeignKey', 404, { error: { code: 'client_not_found', message: 'No such client.' } }],
+    ['unknownForeignKey', 500, INTERNAL],
+    ['bareForeignKey', 500, INTERNAL],
+    ['otherState', 500, INTERNAL],
+  ] as const)('answers %s with %i', async (name, status, body) => {
+    const response = await call(server.baseUrl, `/v1/db-error/${name}`, {
+      token: fx.readerToken,
+    });
+    expect(response.status).toBe(status);
+    expect(response.body).toEqual(body);
   });
 });

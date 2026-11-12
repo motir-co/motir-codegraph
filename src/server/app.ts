@@ -30,7 +30,12 @@ type RecordingApp = FastifyInstance & { [ROUTES]?: RegisteredRoute[] };
  * database answer alike.
  */
 export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
-  const app: RecordingApp = Fastify({ logger: options.logger ?? false });
+  const app: RecordingApp = Fastify({
+    logger: options.logger ?? false,
+    // A field a schema does not name is refused, not silently dropped, so a
+    // caller's typo is a 400 rather than a call that ignored what it sent.
+    ajv: { customOptions: { removeAdditional: false } },
+  });
 
   // Every route, as it is registered, by the router itself: the route
   // enumeration reads this, never a hand-kept list.

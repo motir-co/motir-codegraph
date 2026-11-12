@@ -62,6 +62,7 @@ const OPERATOR_CALLS: [string, () => [string, unknown[]]][] = [
     'codegraph_revoke_access',
     () => ['codegraph.codegraph_revoke_access($1, $2)', [fx.readerId, fx.tenantB.id]],
   ],
+  ['codegraph_get_client', () => ['codegraph.codegraph_get_client($1)', [fx.readerId]]],
 ];
 
 async function callAs(binding: Binding, sql: string, params: unknown[]): Promise<string | null> {
@@ -176,7 +177,7 @@ describe('codegraph_bootstrap_operator', () => {
   });
 });
 
-describe('the functions 0002 creates', () => {
+describe('the functions the migrations create', () => {
   const FUNCTIONS = `
     SELECT p.proname, pg_get_userbyid(p.proowner) AS owner, p.prosecdef,
            p.proconfig::text[] AS config,
