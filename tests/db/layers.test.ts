@@ -13,6 +13,7 @@ import {
   LayerStillReferencedError,
   listReferencedBlobHashes,
   listRefHeadsNamingLayer,
+  listStagedLayersOfCommit,
   listStagedLayersStagedBefore,
   lockTenantExclusive,
   lockTenantShared,
@@ -625,6 +626,25 @@ describe('listReferencedBlobHashes', () => {
     } finally {
       await own.drop();
     }
+  });
+});
+
+describe('listStagedLayersOfCommit', () => {
+  it("answers one commit's staged layers oldest first, never a published or foreign one", async () => {
+    const commitSha = sha();
+    const first = await stagedLayer(web, commitSha);
+    const second = await stagedLayer(web, commitSha);
+    await publishedBase(web, commitSha);
+    await stagedLayer(api, commitSha);
+    await stagedLayer(web);
+    const ids = await bound(web.tenantId, async (c) =>
+      (await listStagedLayersOfCommit(c, web, commitSha)).map((l) => l.id),
+    );
+    expect(ids).toEqual([first.id, second.id]);
+    expect(await bound(web.tenantId, (c) => listStagedLayersOfCommit(c, web, sha()))).toEqual([]);
+    expect(
+      await bound(globex.tenantId, (c) => listStagedLayersOfCommit(c, globex, commitSha)),
+    ).toEqual([]);
   });
 });
 

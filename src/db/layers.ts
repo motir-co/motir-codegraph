@@ -255,6 +255,10 @@ const SELECT_CURRENT_SQL = `SELECT ${LAYER_COLUMNS} FROM codegraph.commit_layers
   WHERE tenant_id = $1 AND repository_id = $2 AND commit_sha = $3
     AND state = 'published' AND superseded_at IS NULL`;
 
+const STAGED_OF_COMMIT_SQL = `SELECT ${LAYER_COLUMNS} FROM codegraph.commit_layers
+  WHERE tenant_id = $1 AND repository_id = $2 AND commit_sha = $3 AND state = 'staged'
+  ORDER BY staged_at, id`;
+
 const NEAREST_ANCESTOR_SQL = `SELECT l.commit_sha AS "commitSha", l.id AS "layerId"
   FROM unnest($3::text[]) WITH ORDINALITY AS candidate(sha, position)
   JOIN codegraph.commit_layers l
@@ -551,6 +555,24 @@ export async function readCurrentPublishedLayer(
     commitSha,
   ]);
   return rows[0] ?? null;
+}
+
+/**
+ * Every staged layer of one commit in this repository, oldest first; empty when
+ * there is none. A commit has at most a handful (a retried job replaces its
+ * own), so the read is unpaged. Reads only.
+ */
+export async function listStagedLayersOfCommit(
+  db: pg.ClientBase,
+  scope: LayerScope,
+  commitSha: string,
+): Promise<LayerRow[]> {
+  const { rows } = await db.query<LayerRow>(STAGED_OF_COMMIT_SQL, [
+    scope.tenantId,
+    scope.repositoryId,
+    commitSha,
+  ]);
+  return rows;
 }
 
 /**
