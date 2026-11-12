@@ -154,17 +154,33 @@ describe('the /v1 failed-authentication limit', () => {
     });
   });
 
-  it('spends no allowance on a successful authentication', async () => {
+  it("spends one attempt on a credential's first success, and none once it is remembered", async () => {
     await withCopy({}, async (copy) => {
       for (let i = 0; i < FAILED_LIMIT + 3; i += 1) {
         expect(
           (await call(copy.baseUrl, statusPath(), { token: fixture.readerToken })).status,
         ).toBe(200);
       }
-      for (let i = 0; i < FAILED_LIMIT; i += 1) {
+      for (let i = 0; i < FAILED_LIMIT - 1; i += 1) {
         expect((await call(copy.baseUrl, statusPath(), { token: madeUp() })).status).toBe(401);
       }
       expect((await call(copy.baseUrl, statusPath(), { token: madeUp() })).status).toBe(429);
+    });
+  });
+
+  it('does not let concurrent made-up tokens overshoot the limit', async () => {
+    await withCopy({}, async (copy) => {
+      const log = recordQueries(copy.pool);
+      const statuses = (
+        await Promise.all(
+          Array.from({ length: 20 }, () => call(copy.baseUrl, statusPath(), { token: madeUp() })),
+        )
+      ).map(({ status }) => status);
+      expect(statuses.filter((status) => status === 401)).toHaveLength(FAILED_LIMIT);
+      expect(statuses.filter((status) => status === 429)).toHaveLength(20 - FAILED_LIMIT);
+      expect(log.texts().filter((text) => text.includes('codegraph_authenticate'))).toHaveLength(
+        FAILED_LIMIT,
+      );
     });
   });
 
@@ -214,6 +230,9 @@ describe('the /v1 failed-authentication limit', () => {
       await asOperator(db.appUrl, fixture.operatorId, 'codegraph.codegraph_revoke_credential($1)', [
         credentialId,
       ]);
+      // Its first success spent one attempt. Its first failure is still
+      // remembered, so passes uncounted, and forgets it; each failure after
+      // that spends one.
       for (let i = 0; i < FAILED_LIMIT; i += 1) {
         expect((await call(copy.baseUrl, statusPath(), { token })).status).toBe(401);
       }

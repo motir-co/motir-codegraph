@@ -298,16 +298,19 @@ not state a call's answer depends on.
   hook, so a flood that reuses one credential takes no connection and runs no
   statement. It does **not** stop a caller who sends a new made-up credential
   on every request: each one is a new caller.
-- **Failed authentications, per address.** Every call refused
-  `unauthenticated` counts against its client address, and an address may fail
-  `FAILED_AUTH_LIMIT_PER_MINUTE` times a minute (60 when unset). Once it has,
-  a call from that address is refused before the `codegraph_authenticate()`
-  call, so it takes no connection and runs no statement, unless its credential
-  has authenticated on this copy within the last minute. That exception is
+- **Failed authentications, per address.** An address may make
+  `FAILED_AUTH_LIMIT_PER_MINUTE` attempts a minute (60 when unset) with a
+  credential that has not authenticated on this copy within the last minute.
+  Each such request is counted before it authenticates, so concurrent requests
+  cannot overshoot the limit, and one over it is refused before the
+  `codegraph_authenticate()` call: it takes no connection and runs no
+  statement. A credential that authenticates is remembered and passes
+  uncounted while it keeps succeeding, so in practice the count is the
+  address's failures plus one for each credential's first success. That is
   what keeps a working caller served while another caller at the same address
-  floods made-up tokens; a credential that then fails is forgotten. A caller
-  whose credential has not authenticated yet is refused with the flood when
-  they share an address.
+  floods made-up tokens; a remembered credential that then fails is forgotten.
+  A missing or malformed credential counts too. A caller whose credential has
+  not authenticated yet is refused with the flood when they share an address.
 
 The client address is the TCP peer unless the peer is a proxy named in
 `TRUST_PROXY` (comma-separated addresses and CIDR ranges: the load balancer's
@@ -317,8 +320,9 @@ bucket per copy for every caller that has not authenticated. A hop count is
 not accepted, since it cannot tell a proxy from a caller that writes its own
 `X-Forwarded-For`.
 
-So the database work a flood can cause is bounded per copy: one
-`codegraph_authenticate()` call per failure allowed, per address, per minute.
+So the database work a flood of made-up credentials can cause is bounded per
+copy: at most `FAILED_AUTH_LIMIT_PER_MINUTE` `codegraph_authenticate()` calls
+per address per minute, however many requests arrive at once.
 
 - Source: `src/server/auth.ts`, `src/server/binding.ts`, `src/server/v1.ts`
   (both limits), `src/server/authLimit.ts` (the failed-authentication limit),

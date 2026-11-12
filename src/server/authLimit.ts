@@ -86,15 +86,17 @@ export class VerifiedCredentials {
 type AuthenticateHook = (request: FastifyRequest) => Promise<void>;
 
 /**
- * Wraps the authentication hook in the failed-authentication limit. Each
- * refusal `unauthenticated` counts against the client's address (`request.ip`,
- * so `trustProxy` must name the load balancer for it to be the real client).
- * Once an address has failed `max` times in the window, a request from it
- * whose credential has not authenticated on this copy recently is refused 429
- * `rate_limited` before the authenticate call, so it takes no connection and
- * runs no statement. A credential that has authenticated passes, so a
- * flood of made-up tokens from an address does not lock out a working caller
- * behind the same address.
+ * Wraps the authentication hook in the failed-authentication limit, counted
+ * per client address (`request.ip`, so `trustProxy` must name the load
+ * balancer for it to be the real client). A request whose credential has not
+ * authenticated on this copy recently is counted BEFORE it authenticates, so
+ * requests in flight at once cannot overshoot the limit: past `max` in the
+ * window, it is refused 429 `rate_limited` before the authenticate call, takes
+ * no connection and runs no statement. In practice the count is the address's
+ * failures plus one for each credential's first success, since a credential
+ * that authenticates is then remembered and passes uncounted. That is what
+ * keeps a working caller served while another caller at the same address
+ * floods made-up tokens; a remembered credential that fails is forgotten.
  */
 export function limitFailedAuthentication(
   app: FastifyInstance,
@@ -102,15 +104,14 @@ export function limitFailedAuthentication(
   settings: RateLimitSettings,
 ): (request: FastifyRequest, reply: FastifyReply) => Promise<void> {
   // The plugin's default key: the client address, an IPv6 address by its /64.
-  const failures = app.createRateLimit({ max: settings.max, timeWindow: settings.timeWindowMs });
+  const attempts = app.createRateLimit({ max: settings.max, timeWindow: settings.timeWindowMs });
   const verified = new VerifiedCredentials(settings.timeWindowMs, VERIFIED_CREDENTIALS_CAPACITY);
 
   return async (request, reply) => {
     const credential = credentialKey(request);
     if (credential === null || !verified.has(credential)) {
-      // A peek: only a failure below spends the address's allowance.
-      const state = await failures(request, { increment: false });
-      if (!state.isAllowed && state.remaining === 0) {
+      const state = await attempts(request);
+      if (!state.isAllowed && state.isExceeded) {
         void reply.header('retry-after', state.ttlInSeconds);
         throw new ApiError('rate_limited', RATE_LIMITED_MESSAGE);
       }
@@ -118,11 +119,8 @@ export function limitFailedAuthentication(
     try {
       await authenticate(request);
     } catch (error) {
-      if (error instanceof ApiError && error.code === 'unauthenticated') {
-        if (credential !== null) {
-          verified.forget(credential);
-        }
-        await failures(request);
+      if (credential !== null && error instanceof ApiError && error.code === 'unauthenticated') {
+        verified.forget(credential);
       }
       throw error;
     }

@@ -71,9 +71,9 @@ export async function v1Plugin(app: FastifyInstance, options: V1Options): Promis
   // before the authenticate call, so a flood that reuses one credential takes
   // no connection. That limit alone does not stop a caller who sends a new
   // made-up credential each time, since each one is a new key; the second
-  // limit, wrapped around authentication, counts the refusals per address and
-  // refuses an address over it 429 before authenticating, unless the request's
-  // credential has already authenticated on this copy.
+  // limit, wrapped around authentication, counts per address every request
+  // whose credential has not authenticated on this copy recently, before it
+  // authenticates, and refuses an address over it 429 without authenticating.
   await app.register(rateLimit, { global: false });
   const limit = options.rateLimit ?? DEFAULT_RATE_LIMIT;
   app.addHook(
