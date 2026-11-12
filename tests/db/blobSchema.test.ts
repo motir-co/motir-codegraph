@@ -219,8 +219,10 @@ describe('codegraph.blob', () => {
     const shape = await withClient(db.ownerUrl, async (c) => ({
       constraints: await queryRows<{ conname: string; contype: string }>(
         c,
+        // PostgreSQL 18 records NOT NULL as pg_constraint rows (contype 'n');
+        // the column nullability is asserted above, so only named constraints count here.
         `SELECT conname, contype FROM pg_constraint
-          WHERE conrelid = 'codegraph.blob'::regclass ORDER BY conname`,
+          WHERE conrelid = 'codegraph.blob'::regclass AND contype <> 'n' ORDER BY conname`,
       ),
       fkey: await queryRows(
         c,

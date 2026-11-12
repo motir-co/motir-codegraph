@@ -13,6 +13,7 @@ import {
   unavailableLanguageForPath,
   unavailableLanguages,
 } from '../../src/indexer/registry.js';
+import { escapeRegExp } from '../helpers/regexp.js';
 
 const require = createRequire(import.meta.url);
 
@@ -279,7 +280,7 @@ describe('the dependency set', () => {
     expect(enabled).toEqual(['esbuild']);
     for (const definition of LANGUAGE_DEFINITIONS) {
       expect(workspace, definition.grammarPackage).toMatch(
-        new RegExp(`^\\s+'?${definition.grammarPackage.replace(/[/.]/g, '\\$&')}'?: false$`, 'm'),
+        new RegExp(`^\\s+'?${escapeRegExp(definition.grammarPackage)}'?: false$`, 'm'),
       );
     }
   });

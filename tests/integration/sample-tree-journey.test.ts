@@ -12,6 +12,7 @@ import {
 } from '../../src/indexer/registry.js';
 import { queryRows, withClient } from '../helpers/db.js';
 import { runScript, type CommandResult } from '../helpers/processes.js';
+import { escapeRegExp } from '../helpers/regexp.js';
 import { asOperator, inBoundTransaction } from '../helpers/tenancy.js';
 import { foundation, type Foundation } from './foundation.fixture.js';
 
@@ -654,7 +655,7 @@ describe('the sample tree, through the shipped library and its fixture command',
       }
       expect(lines.at(-1)).toMatch(
         new RegExp(
-          `^reextract ${REEXTRACTED} to ${(current ?? '').replace(/[.]/g, '\\.')}: batches=1 blobs=2 facts=\\d+$`,
+          `^reextract ${REEXTRACTED} to ${escapeRegExp(current ?? '')}: batches=1 blobs=2 facts=\\d+$`,
         ),
       );
 
