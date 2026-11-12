@@ -24,6 +24,7 @@ import {
   readCurrentPublishedLayer,
   readLayerById,
   readLayerPathsByLayerIds,
+  readLayerPathsPage,
   readRefHead,
   UnknownLayerError,
   type LayerRow,
@@ -626,6 +627,38 @@ describe('listReferencedBlobHashes', () => {
     } finally {
       await own.drop();
     }
+  });
+});
+
+describe('readLayerPathsPage', () => {
+  it("pages one layer's own rows in byte-wise path order until drained", async () => {
+    const paths: PathEntry[] = ['b', 'a', 'Z', 'é', 'c/d', 'gone'].map((path, i) => ({
+      path,
+      gitBlobHash: path === 'gone' ? null : sha().padEnd(40, String(i)),
+    }));
+    const layer = await publishedBase(web, sha(), paths);
+    await publishedBase(web, sha(), [{ path: 'other', gitBlobHash: sha() }]);
+    const seen: string[] = [];
+    let after: string | null = null;
+    let pages = 0;
+    do {
+      const page = await bound(web.tenantId, (c) =>
+        readLayerPathsPage(c, web, layer.id, { after, limit: 4 }),
+      );
+      seen.push(...page.entries.map((e) => e.path));
+      after = page.next;
+      pages += 1;
+    } while (after !== null);
+    expect(seen).toEqual(['Z', 'a', 'b', 'c/d', 'gone', 'é']);
+    expect(pages).toBe(2);
+    const whole = await bound(web.tenantId, (c) => readLayerPathsPage(c, web, layer.id));
+    expect(whole.entries).toHaveLength(6);
+    expect(whole.entries.find((e) => e.path === 'gone')?.gitBlobHash).toBeNull();
+    expect(whole.next).toBeNull();
+    expect(await bound(globex.tenantId, (c) => readLayerPathsPage(c, globex, layer.id))).toEqual({
+      entries: [],
+      next: null,
+    });
   });
 });
 

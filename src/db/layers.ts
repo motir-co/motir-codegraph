@@ -104,6 +104,12 @@ export interface RefHeadMove extends LayerScope {
 }
 
 /** One page of a tenant's referenced blob hashes, and where the next starts. */
+/** One page of one layer's path rows, and the path to ask after (null at the end). */
+export interface LayerPathPage {
+  readonly entries: PathEntry[];
+  readonly next: string | null;
+}
+
 export interface BlobHashPage {
   readonly hashes: readonly string[];
   /** Pass as `after` to read the next page; null when this page was the last. */
@@ -247,6 +253,15 @@ const SELECT_PATHS_SQL = `SELECT p.layer_id AS "layerId", p.path, p.git_blob_has
   JOIN unnest($3::uuid[]) WITH ORDINALITY AS wanted(id, position) ON wanted.id = p.layer_id
   WHERE p.tenant_id = $1 AND p.repository_id = $2
   ORDER BY wanted.position, p.path COLLATE "C"`;
+
+// Keyset paging in byte-wise path order; the primary key (tenant, repository,
+// layer, path) serves the range.
+const LAYER_PATHS_PAGE_SQL = `SELECT p.path, p.git_blob_hash AS "gitBlobHash"
+  FROM codegraph.layer_paths p
+  WHERE p.tenant_id = $1 AND p.repository_id = $2 AND p.layer_id = $3
+    AND ($4::text IS NULL OR p.path COLLATE "C" > $4::text COLLATE "C")
+  ORDER BY p.path COLLATE "C"
+  LIMIT $5`;
 
 const SELECT_REF_HEAD_SQL = `SELECT ${REF_COLUMNS} FROM codegraph.ref_heads
   WHERE tenant_id = $1 AND repository_id = $2 AND ref_name = $3`;
@@ -520,6 +535,29 @@ export async function readLayerPathsByLayerIds(
     found.push(...rows);
   }
   return found;
+}
+
+/**
+ * One page of a single layer's own path rows in byte-wise path order, after
+ * the path `after` (exclusive), at most `limit` rows. `next` is the last path
+ * of a full page, null once the layer is drained. Reads only.
+ */
+export async function readLayerPathsPage(
+  db: pg.ClientBase,
+  scope: LayerScope,
+  layerId: string,
+  options: { readonly after?: string | null; readonly limit?: number } = {},
+): Promise<LayerPathPage> {
+  const limit = positiveBatch('limit', options.limit ?? APPEND_BATCH_SIZE);
+  const { rows } = await db.query<PathEntry>(LAYER_PATHS_PAGE_SQL, [
+    scope.tenantId,
+    scope.repositoryId,
+    layerId,
+    options.after ?? null,
+    limit,
+  ]);
+  const last = rows[rows.length - 1];
+  return { entries: rows, next: rows.length === limit && last !== undefined ? last.path : null };
 }
 
 /** One repository's row for one ref name, or null. Reads only. */
