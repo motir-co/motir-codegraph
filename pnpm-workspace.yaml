@@ -2,3 +2,8 @@ allowBuilds:
   # vitest and tsx run TypeScript through esbuild, whose install step fetches
   # the platform binary.
   esbuild: true
+  # Tree-sitter grammar packages: their install step builds a native Node
+  # binding this service never loads. It runs grammars through web-tree-sitter
+  # and loads each package's prebuilt .wasm (docs/tree-sitter-runtime.md).
+  tree-sitter-javascript: false
+  tree-sitter-typescript: false
