@@ -95,7 +95,11 @@ describe('the command', () => {
   it('is declared as layer:journey, runs node, and ran every step to a clean exit', () => {
     expect(scriptNodeArgs('layer:journey')).toContain('src/cli/layer-journey.ts');
     for (const run of [partial, full]) {
-      expect(run.stderr).toBe('');
+      // Node announces a missing .env under --env-file-if-exists (CI has none); nothing else may reach stderr.
+      const stderr = run.stderr
+        .split('\n')
+        .filter((line) => line !== '' && !/^\.env not found\. Continuing without it/.test(line));
+      expect(stderr).toEqual([]);
       expect(run.code).toBe(0);
     }
     expect([...seen.keys()]).toEqual([1, 2, 3, 4, 5, 6, 7]);
