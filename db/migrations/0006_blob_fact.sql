@@ -123,11 +123,12 @@ CREATE UNIQUE INDEX blob_fact_identity_key ON codegraph.blob_fact (
       || quote_nullable(module_specifier) || ',' || quote_nullable(parent_name))
 ) NULLS NOT DISTINCT;
 
--- A lookup by name. A hash index, because a name can exceed a btree entry's
--- limit and a lookup by name is equality; the tenant comes from the policy.
--- One blob's facts are read through the identity key's index, which leads
--- with (tenant_id, git_blob_hash).
-CREATE INDEX blob_fact_name_idx ON codegraph.blob_fact USING hash (name);
+-- A lookup by name within a tenant, leading with the tenant. A name is source
+-- text of any length, so the index holds its md5, as the identity key does; a
+-- lookup says `tenant_id = $1 AND md5(name) = md5($2) AND name = $2`, the last
+-- term ruling out a collision. One blob's facts are read through the identity
+-- key's index, which leads with (tenant_id, git_blob_hash).
+CREATE INDEX blob_fact_name_idx ON codegraph.blob_fact (tenant_id, md5(name), kind);
 
 -- ── row-level security ─────────────────────────────────────────────────────
 ALTER TABLE codegraph.blob_fact ENABLE ROW LEVEL SECURITY;

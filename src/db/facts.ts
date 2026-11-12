@@ -261,7 +261,9 @@ function insertStatement(blob: BlobKey, facts: readonly StoredFact[]): [string, 
 /**
  * Inserts one producer's facts for one blob, in statements of at most
  * `FACT_INSERT_CHUNK` rows. Insert-only, no conflict clause: a second set for
- * the same producer raises on the identity key rather than doubling. Writes no
+ * the same producer raises on the identity key rather than doubling. The key
+ * leaves out `importedNames`: a producer gives one import per specifier at one
+ * range, merging the names of every match there, as `buildFacts` does. Writes no
  * blob row and opens no transaction; a chunk the table refuses aborts the
  * caller's transaction, so none of the set survives it.
  */

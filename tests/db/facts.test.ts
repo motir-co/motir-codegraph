@@ -224,6 +224,45 @@ async function inSavepoint(c: pg.Client, fn: () => Promise<unknown>): Promise<st
   }
 }
 
+describe('the indexes', () => {
+  it('are exactly the identity key and a tenant-leading name index, both fixed-size', async () => {
+    const defs = await queryRows<{ indexname: string; indexdef: string }>(
+      owner,
+      `SELECT indexname, indexdef FROM pg_indexes
+        WHERE schemaname = 'codegraph' AND tablename = 'blob_fact' ORDER BY indexname`,
+    );
+    expect(defs.map((d) => d.indexname)).toEqual(['blob_fact_identity_key', 'blob_fact_name_idx']);
+    expect(defs[0]?.indexdef).toMatch(
+      /^CREATE UNIQUE INDEX blob_fact_identity_key ON codegraph\.blob_fact USING btree \(tenant_id, git_blob_hash, producer, kind, .*md5\(.*\) NULLS NOT DISTINCT$/,
+    );
+    expect(defs[1]?.indexdef).toBe(
+      'CREATE INDEX blob_fact_name_idx ON codegraph.blob_fact USING btree (tenant_id, md5(name), kind)',
+    );
+  });
+
+  it('serves a lookup by a name of any length within a tenant from the name index', async () => {
+    const blob = await seedBlob(tenantA);
+    const longName = `f${randomBytes(2000).toString('hex')}`;
+    const fact = { ...(fourKinds()[1] as StoredFact), name: longName } as StoredFact;
+    await asTenant(tenantA, (c) => insertFacts(c, blob, [fact]));
+    const lookup = `SELECT name FROM codegraph.blob_fact
+      WHERE tenant_id = $1 AND md5(name) = md5($2) AND name = $2`;
+    await owner.query('BEGIN');
+    try {
+      await owner.query('SET LOCAL enable_seqscan = off');
+      const plan = await queryRows<{ 'QUERY PLAN': string }>(owner, `EXPLAIN ${lookup}`, [
+        tenantA,
+        longName,
+      ]);
+      expect(plan.map((row) => row['QUERY PLAN']).join('\n')).toContain('blob_fact_name_idx');
+      const found = await queryRows<{ name: string }>(owner, lookup, [tenantA, longName]);
+      expect(found).toEqual([{ name: longName }]);
+    } finally {
+      await owner.query('ROLLBACK');
+    }
+  });
+});
+
 describe('the mapping', () => {
   it('round-trips all four kinds with their stamps', async () => {
     const blob = await seedBlob(tenantA);
