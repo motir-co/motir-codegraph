@@ -22,13 +22,18 @@ import type pg from 'pg';
 
 import { BIND_TENANT_SQL } from '../server/binding.js';
 
+/**
+ * A blob's one per-file outcome: the four values `blob_outcome_check` admits,
+ * declared once, here, beside the row that stores it.
+ */
+export type BlobOutcome = 'indexed' | 'unsupported' | 'binary' | 'refused';
+
 /** One stored blob row, as the table declares it. */
 export interface BlobRow {
   readonly tenantId: string;
   readonly gitBlobHash: string;
   readonly sizeBytes: number;
-  /** The table's CHECK keeps it to four values; the caller narrows it. */
-  readonly outcome: string;
+  readonly outcome: BlobOutcome;
   readonly parsedWithErrors: boolean | null;
   readonly lossy: boolean | null;
   readonly refusedCapBytes: number | null;
@@ -41,7 +46,7 @@ export interface NewBlob {
   readonly tenantId: string;
   readonly gitBlobHash: string;
   readonly sizeBytes: number;
-  readonly outcome: string;
+  readonly outcome: BlobOutcome;
   readonly parsedWithErrors?: boolean | null;
   readonly lossy?: boolean | null;
   readonly refusedCapBytes?: number | null;
@@ -57,7 +62,7 @@ export interface InsertedBlob {
 
 /** The four columns a re-classification moves. */
 export interface BlobClassification {
-  readonly outcome: string;
+  readonly outcome: BlobOutcome;
   readonly language: string | null;
   readonly lossy: boolean | null;
   readonly refusedCapBytes: number | null;
