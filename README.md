@@ -65,12 +65,13 @@ in filename order, each in its own transaction, as `codegraph_owner`:
 applied 0001_tenancy.sql
 applied 0002_row_level_security.sql
 applied 0003_operator_client_read.sql
+applied 0004_delete_functions.sql
 ```
 
 The second applies nothing:
 
 ```text
-nothing to apply (3 already applied)
+nothing to apply (4 already applied)
 ```
 
 `pnpm test` then runs the suite against the same Postgres; every test creates and

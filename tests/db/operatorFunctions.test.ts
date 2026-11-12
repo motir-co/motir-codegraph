@@ -63,6 +63,17 @@ const OPERATOR_CALLS: [string, () => [string, unknown[]]][] = [
     () => ['codegraph.codegraph_revoke_access($1, $2)', [fx.readerId, fx.tenantB.id]],
   ],
   ['codegraph_get_client', () => ['codegraph.codegraph_get_client($1)', [fx.readerId]]],
+  [
+    'codegraph_delete_tenant_as_operator',
+    () => ['codegraph.codegraph_delete_tenant_as_operator($1)', [randomUUID()]],
+  ],
+  [
+    'codegraph_delete_repository_as_operator',
+    () => [
+      'codegraph.codegraph_delete_repository_as_operator($1, $2)',
+      [fx.tenantA.id, randomUUID()],
+    ],
+  ],
 ];
 
 async function callAs(binding: Binding, sql: string, params: unknown[]): Promise<string | null> {
@@ -193,6 +204,7 @@ describe('the functions the migrations create', () => {
     const appCallable = new Set([
       'codegraph_authenticate',
       'codegraph_bound_tenant',
+      'codegraph_tenant_exists',
       ...OPERATOR_CALLS.map(([name]) => name),
     ]);
     expect(rows).toEqual(
