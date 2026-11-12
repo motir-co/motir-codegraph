@@ -1,10 +1,14 @@
-import { createHash } from 'node:crypto';
-
 import rateLimit from '@fastify/rate-limit';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type pg from 'pg';
 
 import { authenticate } from './auth.js';
+import {
+  credentialKey,
+  limitFailedAuthentication,
+  RATE_LIMITED_MESSAGE,
+  type RateLimitSettings,
+} from './authLimit.js';
 import { bind, commitOrRollback, releaseRequestDb } from './binding.js';
 import { ApiError, handleNotFound } from './errors.js';
 import { operatorRoutes } from './operator.js';
@@ -22,27 +26,30 @@ export interface V1Options {
   routes?: readonly V1Routes[];
   /** Requests one caller may make per window; `DEFAULT_RATE_LIMIT` when unset. */
   rateLimit?: RateLimitSettings;
+  /**
+   * Failed authentications one address may make per window;
+   * `DEFAULT_FAILED_AUTH_LIMIT` when unset.
+   */
+  failedAuthLimit?: RateLimitSettings;
 }
 
-export interface RateLimitSettings {
-  max: number;
-  timeWindowMs: number;
-}
+export type { RateLimitSettings } from './authLimit.js';
 
 /** 1200 requests a minute per caller, per copy. */
 export const DEFAULT_RATE_LIMIT: RateLimitSettings = { max: 1200, timeWindowMs: 60_000 };
 
+/** 60 failed authentications a minute per client address, per copy. */
+export const DEFAULT_FAILED_AUTH_LIMIT: RateLimitSettings = { max: 60, timeWindowMs: 60_000 };
+
 /**
- * Who a request counts against: its credential (as a hash, so no token is held
- * in memory), or its address when it presents none. Behind a load balancer
- * every caller shares an address, so the credential is the useful key.
+ * Who a request counts against in the per-caller limit: its credential (as a
+ * hash, so no token is held in memory), or its address when it presents none.
+ * A caller that sends a new made-up credential on every request gets a new
+ * key every time; the failed-authentication limit is what stops that one.
  */
 export function rateLimitKey(request: FastifyRequest): string {
-  const authorization = request.headers.authorization;
-  if (authorization === undefined || authorization === '') {
-    return `ip:${request.ip}`;
-  }
-  return `credential:${createHash('sha256').update(authorization).digest('base64url')}`;
+  const credential = credentialKey(request);
+  return credential === null ? `ip:${request.ip}` : `credential:${credential}`;
 }
 
 /** The route modules every copy of the server serves. */
@@ -59,8 +66,14 @@ export async function v1Plugin(app: FastifyInstance, options: V1Options): Promis
   app.decorateRequest('auth', null);
   app.decorateRequest('dbState', null);
 
-  // The first hook: a caller over its limit is refused 429 before the
-  // authenticate call, so a flood costs no database work.
+  // Two limits run before any database work. The first hook counts every
+  // request against its credential: a caller over its limit is refused 429
+  // before the authenticate call, so a flood that reuses one credential takes
+  // no connection. That limit alone does not stop a caller who sends a new
+  // made-up credential each time, since each one is a new key; the second
+  // limit, wrapped around authentication, counts the refusals per address and
+  // refuses an address over it 429 before authenticating, unless the request's
+  // credential has already authenticated on this copy.
   await app.register(rateLimit, { global: false });
   const limit = options.rateLimit ?? DEFAULT_RATE_LIMIT;
   app.addHook(
@@ -69,11 +82,17 @@ export async function v1Plugin(app: FastifyInstance, options: V1Options): Promis
       max: limit.max,
       timeWindow: limit.timeWindowMs,
       keyGenerator: rateLimitKey,
-      errorResponseBuilder: () =>
-        new ApiError('rate_limited', 'Too many requests; retry after the Retry-After seconds.'),
+      errorResponseBuilder: () => new ApiError('rate_limited', RATE_LIMITED_MESSAGE),
     }),
   );
-  app.addHook('onRequest', authenticate(options.pool));
+  app.addHook(
+    'onRequest',
+    limitFailedAuthentication(
+      app,
+      authenticate(options.pool),
+      options.failedAuthLimit ?? DEFAULT_FAILED_AUTH_LIMIT,
+    ),
+  );
   app.addHook('preHandler', bind);
   app.addHook('onSend', commitOrRollback);
   app.addHook('onResponse', releaseRequestDb);

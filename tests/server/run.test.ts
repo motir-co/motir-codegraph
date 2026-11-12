@@ -4,7 +4,13 @@ import { fileURLToPath } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { readPort, readRateLimit, runServer } from '../../src/server/run.js';
+import {
+  readFailedAuthLimit,
+  readPort,
+  readRateLimit,
+  readTrustProxy,
+  runServer,
+} from '../../src/server/run.js';
 import { freshDatabase, type FreshDatabase } from '../helpers/db.js';
 import { call } from '../helpers/server.js';
 
@@ -48,6 +54,50 @@ describe('readRateLimit', () => {
   it.each(['many', '0', '-5', '2.5'])('refuses RATE_LIMIT_PER_MINUTE=%s', (raw) => {
     expect(() => readRateLimit({ RATE_LIMIT_PER_MINUTE: raw })).toThrow(
       /RATE_LIMIT_PER_MINUTE must be a whole number/,
+    );
+  });
+});
+
+describe('readFailedAuthLimit', () => {
+  it('defaults to 60 a minute and reads a valid limit', () => {
+    expect(readFailedAuthLimit({})).toEqual({ max: 60, timeWindowMs: 60_000 });
+    expect(readFailedAuthLimit({ FAILED_AUTH_LIMIT_PER_MINUTE: '10' })).toEqual({
+      max: 10,
+      timeWindowMs: 60_000,
+    });
+  });
+
+  it.each(['few', '0', '1.5'])('refuses FAILED_AUTH_LIMIT_PER_MINUTE=%s', (raw) => {
+    expect(() => readFailedAuthLimit({ FAILED_AUTH_LIMIT_PER_MINUTE: raw })).toThrow(
+      /FAILED_AUTH_LIMIT_PER_MINUTE must be a whole number/,
+    );
+  });
+});
+
+describe('readTrustProxy', () => {
+  it('trusts no proxy when unset', () => {
+    expect(readTrustProxy({})).toEqual([]);
+    expect(readTrustProxy({ TRUST_PROXY: '  ' })).toEqual([]);
+  });
+
+  it('reads addresses, CIDR ranges and the preset range names', () => {
+    expect(
+      readTrustProxy({ TRUST_PROXY: '10.0.0.0/16, 10.1.2.3,fd00::/8, ::1, uniquelocal' }),
+    ).toEqual(['10.0.0.0/16', '10.1.2.3', 'fd00::/8', '::1', 'uniquelocal']);
+  });
+
+  it.each([
+    '1',
+    'true',
+    '10.0.0.0/33',
+    '::/129',
+    '10.0.0.0/x',
+    '10.0.0.0/8/8',
+    'lb.internal',
+    '10.0.0.1,',
+  ])('refuses TRUST_PROXY=%s', (raw) => {
+    expect(() => readTrustProxy({ TRUST_PROXY: raw })).toThrow(
+      /TRUST_PROXY must be a comma-separated list of proxy addresses and CIDR ranges/,
     );
   });
 });

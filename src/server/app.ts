@@ -15,6 +15,14 @@ export interface BuildAppOptions {
   v1Routes?: readonly V1Routes[];
   /** The per-caller request limit on `/v1`; the default when unset. */
   rateLimit?: RateLimitSettings;
+  /** The per-address failed-authentication limit on `/v1`; the default when unset. */
+  failedAuthLimit?: RateLimitSettings;
+  /**
+   * The addresses and CIDR ranges of the proxies whose `X-Forwarded-For` is
+   * believed, so `request.ip` is the real client. None when unset, and then
+   * every caller behind a load balancer shares its address.
+   */
+  trustProxy?: readonly string[];
 }
 
 export interface RegisteredRoute {
@@ -37,6 +45,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     // A field a schema does not name is refused, not silently dropped, so a
     // caller's typo is a 400 rather than a call that ignored what it sent.
     ajv: { customOptions: { removeAdditional: false } },
+    // Only these peers' X-Forwarded-For is read; a hop count is not offered,
+    // since it cannot tell a proxy from a direct caller (Fastify ignores one).
+    trustProxy:
+      options.trustProxy === undefined || options.trustProxy.length === 0
+        ? false
+        : [...options.trustProxy],
   });
 
   // Every route, as it is registered, by the router itself: the route
@@ -59,6 +73,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     pool: options.pool,
     ...(options.v1Routes === undefined ? {} : { routes: options.v1Routes }),
     ...(options.rateLimit === undefined ? {} : { rateLimit: options.rateLimit }),
+    ...(options.failedAuthLimit === undefined ? {} : { failedAuthLimit: options.failedAuthLimit }),
   });
   await app.ready();
   return app;
