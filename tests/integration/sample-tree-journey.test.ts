@@ -10,6 +10,7 @@ import {
   listLanguages,
   unavailableLanguages,
 } from '../../src/indexer/registry.js';
+import { MIGRATIONS_DIR } from '../../src/db/migrate.js';
 import { queryRows, withClient } from '../helpers/db.js';
 import { runScript, type CommandResult } from '../helpers/processes.js';
 import { escapeRegExp } from '../helpers/regexp.js';
@@ -210,7 +211,9 @@ describe('the sample tree, through the shipped library and its fixture command',
     'step 1: a second migrate applies nothing, and the three tables exist',
     async () => {
       const result = await runScript('db:migrate', { DATABASE_URL: f.db.ownerUrl });
-      expect(succeeded(result)).toEqual(['nothing to apply (6 already applied)']);
+      // Every shipped migration, counted from the directory rather than pinned.
+      const shipped = readdirSync(MIGRATIONS_DIR).filter((name) => name.endsWith('.sql')).length;
+      expect(succeeded(result)).toEqual([`nothing to apply (${String(shipped)} already applied)`]);
       const tables = await withClient(f.db.ownerUrl, (c) =>
         queryRows<{ name: string; present: boolean }>(
           c,

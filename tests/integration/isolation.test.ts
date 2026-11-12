@@ -1,10 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-import type pg from 'pg';
+import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { readLayerSettings } from '../../src/config.js';
+import { findNearestPublishedAncestor } from '../../src/db/layers.js';
 import { storeBlob } from '../../src/indexing/storeBlob.js';
+import { openLayer } from '../../src/layers/openLayer.js';
+import { publishLayer } from '../../src/layers/publish.js';
+import { resolveCommit, ResolutionRefusedError } from '../../src/layers/resolution.js';
 import { queryRows, sqlState, withClient } from '../helpers/db.js';
 import { asOperator, inBoundTransaction, type Binding } from '../helpers/tenancy.js';
 import { foundation, type Foundation } from './foundation.fixture.js';
@@ -331,5 +336,96 @@ describe('revocation', () => {
       ),
     );
     expect(await authenticate()).toEqual([]);
+  });
+});
+
+describe('commit layers: a session bound to A resolves no commit of B', () => {
+  it('refuses to resolve B’s commit, finds no ancestor among B’s commits, and changes none of B’s layer rows', async () => {
+    const [repoB] = f.fx.tenantB.repositories;
+    if (repoB === undefined) throw new Error('fixture has no repository in B');
+    const scopeB = { tenantId: f.fx.tenantB.id, repositoryId: repoB.id };
+    const writerB = (await asOperator<string>(
+      f.db.appUrl,
+      f.fx.operatorId,
+      'codegraph.codegraph_create_client($1, $2)',
+      ['layer-writer-b', 'client'],
+    )) as string;
+    await asOperator(f.db.appUrl, f.fx.operatorId, 'codegraph.codegraph_grant_access($1, $2)', [
+      writerB,
+      f.fx.tenantB.id,
+    ]);
+
+    // B's commit, indexed through the library over the blobs B already stores.
+    const sha = createHash('sha1').update('globex commit').digest('hex');
+    const pool = new pg.Pool({ connectionString: f.db.appUrl, max: 2 });
+    try {
+      const opened = await openLayer(pool, {
+        clientId: writerB,
+        ...scopeB,
+        commitSha: sha,
+        refName: 'refs/heads/main',
+        isDefaultBranch: true,
+        candidateAncestors: [],
+        paths: new Map([
+          ['shapes.ts', gitBlobHash(SHARED)],
+          ['shapes.go', gitBlobHash(ONLY_B)],
+        ]),
+        settings: readLayerSettings({}),
+      });
+      await publishLayer(pool, {
+        clientId: writerB,
+        ...scopeB,
+        layerId: opened.layerId,
+        ref: { name: 'refs/heads/main', isDefaultBranch: true },
+      });
+    } finally {
+      await pool.end();
+    }
+
+    const layerRowsOfB = () =>
+      withClient(f.db.ownerUrl, async (c) => ({
+        layers: await queryRows(c, 'SELECT * FROM codegraph.commit_layers WHERE tenant_id = $1', [
+          scopeB.tenantId,
+        ]),
+        paths: await queryRows(
+          c,
+          'SELECT * FROM codegraph.layer_paths WHERE tenant_id = $1 ORDER BY path',
+          [scopeB.tenantId],
+        ),
+        heads: await queryRows(c, 'SELECT * FROM codegraph.ref_heads WHERE tenant_id = $1', [
+          scopeB.tenantId,
+        ]),
+      }));
+    const before = await layerRowsOfB();
+    expect(before.layers).toHaveLength(1);
+    expect(before.paths).toHaveLength(2);
+
+    await withClient(f.db.appUrl, (c) =>
+      inBoundTransaction(c, { clientId: f.fx.readerId, tenantId: f.fx.tenantA.id }, async () => {
+        const refusal = resolveCommit(c, scopeB.tenantId, scopeB.repositoryId, sha);
+        await expect(refusal).rejects.toBeInstanceOf(ResolutionRefusedError);
+        await expect(refusal).rejects.toMatchObject({ reason: 'tenant_not_bound' });
+      }),
+    );
+    await withClient(f.db.appUrl, (c) =>
+      inBoundTransaction(
+        c,
+        { clientId: f.fx.readerId, tenantId: f.fx.tenantA.id },
+        async () => {
+          expect(await findNearestPublishedAncestor(c, scopeB, [sha])).toBeNull();
+          const writes = [
+            'UPDATE codegraph.commit_layers SET superseded_at = now() WHERE tenant_id = $1',
+            "UPDATE codegraph.ref_heads SET commit_sha = repeat('0', 40) WHERE tenant_id = $1",
+            'DELETE FROM codegraph.layer_paths WHERE tenant_id = $1',
+            'DELETE FROM codegraph.commit_layers WHERE tenant_id = $1',
+          ];
+          for (const sql of writes) {
+            expect((await c.query(sql, [scopeB.tenantId])).rowCount).toBe(0);
+          }
+        },
+        { commit: true },
+      ),
+    );
+    expect(await layerRowsOfB()).toEqual(before);
   });
 });

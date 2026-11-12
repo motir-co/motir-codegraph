@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { insertLayer, appendLayerPaths, markPublished, moveRefHead } from '../../src/db/layers.js';
 import { queryRows, withClient } from '../helpers/db.js';
 import { rowsReferencing, snapshot } from '../helpers/rows.js';
 import { inBoundTransaction } from '../helpers/tenancy.js';
@@ -36,6 +37,24 @@ beforeEach(async () => {
               'INSERT INTO codegraph.content_access_log (tenant_id, repository_id, client_id, content_ref) VALUES ($1, $2, $3, $4)',
               [tenant.id, repository.id, f.fx.readerId, `${repository.name}@${randomUUID()}`],
             );
+            // And a published layer with a path row and a ref head naming it,
+            // written through the layer repository.
+            const scope = { tenantId: tenant.id, repositoryId: repository.id };
+            const layer = await insertLayer(c, {
+              ...scope,
+              commitSha: 'a'.repeat(40),
+              kind: 'base',
+            });
+            await appendLayerPaths(c, scope, layer.id, [
+              { path: 'README.md', gitBlobHash: 'b'.repeat(40) },
+            ]);
+            await markPublished(c, scope, layer.id);
+            await moveRefHead(c, {
+              ...scope,
+              refName: 'refs/heads/main',
+              layerId: layer.id,
+              isDefaultBranch: true,
+            });
           }
         },
         { commit: true },
@@ -60,6 +79,14 @@ describe('deleting a repository', () => {
       const remaining = await snapshot(c, f.fx.tenantA.id);
       expect(remaining.repositories.map((r) => r.id)).toEqual([api.id]);
       expect(remaining.log.map((r) => r.repository_id)).toEqual([api.id]);
+      for (const table of ['commit_layers', 'layer_paths', 'ref_heads']) {
+        const rows = await queryRows<{ repository_id: string }>(
+          c,
+          `SELECT repository_id FROM codegraph.${table} WHERE tenant_id = $1`,
+          [f.fx.tenantA.id],
+        );
+        expect(rows.map((r) => r.repository_id)).toEqual([api.id]);
+      }
       expect(await snapshot(c, f.fx.tenantB.id)).toEqual(b);
     });
   });
@@ -71,6 +98,10 @@ describe('deleting a tenant', () => {
       const b = await snapshot(c, f.fx.tenantB.id);
       const clients = await queryRows(c, 'SELECT * FROM codegraph.clients ORDER BY id');
       const credentials = await queryRows(c, 'SELECT * FROM codegraph.credentials ORDER BY id');
+      const seeded = await rowsReferencing(c, 'tenant_id', f.fx.tenantA.id);
+      for (const table of ['commit_layers', 'layer_paths', 'ref_heads']) {
+        expect(seeded[table]).toBe(f.fx.tenantA.repositories.length);
+      }
       await c.query('DELETE FROM codegraph.tenants WHERE id = $1', [f.fx.tenantA.id]);
       const left = await rowsReferencing(c, 'tenant_id', f.fx.tenantA.id);
       expect(Object.keys(left).sort()).toEqual([

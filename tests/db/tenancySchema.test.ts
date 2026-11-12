@@ -128,7 +128,8 @@ describe('codegraph_app, the login the service runs as', () => {
         SELECT t AS table, p AS privilege, has_table_privilege('codegraph.' || t, p) AS allowed
         FROM unnest(ARRAY['tenants','repositories','clients','credentials','grants',
                           'content_access_log','schema_migrations',
-                          'blob','blob_contents','blob_fact']) t,
+                          'blob','blob_contents','blob_fact',
+                          'commit_layers','layer_paths','ref_heads']) t,
              unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p
         ORDER BY 1, 2`)
         ).rows,
@@ -136,6 +137,8 @@ describe('codegraph_app, the login the service runs as', () => {
     const allowed = matrix
       .filter((row) => row.allowed)
       .map((row) => `${row.table}:${row.privilege}`);
+    // UPDATE on commit_layers and ref_heads is granted per column, so it is
+    // measured by the column-privilege read below, not here.
     expect(allowed.sort()).toEqual(
       [
         'blob:DELETE',
@@ -147,7 +150,15 @@ describe('codegraph_app, the login the service runs as', () => {
         'blob_fact:DELETE',
         'blob_fact:INSERT',
         'blob_fact:SELECT',
+        'commit_layers:DELETE',
+        'commit_layers:INSERT',
+        'commit_layers:SELECT',
         'content_access_log:INSERT',
+        'layer_paths:DELETE',
+        'layer_paths:INSERT',
+        'layer_paths:SELECT',
+        'ref_heads:INSERT',
+        'ref_heads:SELECT',
         'repositories:DELETE',
         'repositories:SELECT',
         'tenants:DELETE',
