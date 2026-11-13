@@ -16,26 +16,30 @@ export const COMPACT_TARGET_MS = 60_000;
 
 /**
  * How the resolution target is judged on a shared runner (MOTIR-11228). The
- * SAME code read 112–173 ms on GitHub's shared runners and 51–63 ms on a quiet
- * 4-core machine, so a wall-clock bound with 25–35 % headroom failed on a slow
- * runner rather than on slow resolution. The gate therefore asserts what the
- * resolution statement itself controls: its cost over a same-run baseline that
- * reads the same 20,000 rows of ONE layer, timed pass by pass beside it on the
- * same connection, so a slow runner slows both sides.
+ * SAME code read 112–173 ms on GitHub's shared runners, so a wall-clock bound
+ * with 25–35 % headroom failed on a slow runner rather than on slow
+ * resolution. Most of a resolution is sorting 20,000 paths, and its cost also
+ * moves with the database's COLLATION: CI's Postgres image creates databases
+ * in `en_US.utf8`, where the same statement takes about twice as long as under
+ * `C` (~105 ms against ~52 ms on one quiet 4-core machine). The gate therefore
+ * asserts what the resolution statement itself controls: its cost over a
+ * same-run baseline that reads and SORTS the same 20,000 paths of ONE layer in
+ * the same collation, timed pass by pass beside it on the same connection, so
+ * a slow runner and a slow collation slow both sides.
  *
  * - RESOLVE_OVERHEAD_LIMIT: the median of the per-pass ratios may not exceed
- *   it. Measured locally: 3.65× quiet; 2.28× and 1.93× with the cores 2× and 4×
- *   oversubscribed (where the old bound read 156.6 ms and would have failed);
- *   8.67× for a resolution doing its work twice, which this limit fails and the
- *   old 150 ms bound passed at 109.8 ms.
+ *   it. Measured locally: 4.5–4.7× quiet under `en_US.UTF-8`, 2.85× under `C`;
+ *   2.42× and 2.70× with the cores 2× and 4× oversubscribed (where the
+ *   resolution read 142 ms and 197 ms); 10.27× for a resolution doing its work
+ *   twice, which this limit fails.
  * - RESOLVE_SUITE_BOUND_MS: a loose absolute backstop on the median, twice the
- *   target, for a regression that slows the baseline read as much as the
- *   resolution (a lost primary key, a bloated table). It sits 73 % above the
- *   slowest reading CI has produced.
+ *   target, for a regression that slows the baseline as much as the resolution
+ *   (a lost primary key, a bloated table). It sits 73 % above the slowest
+ *   median CI has produced.
  * - RESOLVE_TARGET_MS stays the story's number and is printed beside every
  *   reading; on its own it no longer fails the suite.
  */
-export const RESOLVE_OVERHEAD_LIMIT = 6;
+export const RESOLVE_OVERHEAD_LIMIT = 8;
 export const RESOLVE_SUITE_BOUND_MS = 2 * RESOLVE_TARGET_MS;
 /** The resolution gate's measured passes: odd, so the median is one reading. */
 export const RESOLVE_REPETITIONS = 7;

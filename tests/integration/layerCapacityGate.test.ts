@@ -91,11 +91,11 @@ describe('resolutionMisses', () => {
   });
 
   it('fails a resolution that got slower over the same baseline', () => {
-    // A resolution doing its work twice: 8.67× locally, under 150 ms.
-    const regressed = paired([12, 12, 13, 12, 13, 11, 16], [107, 107, 107, 110, 116, 110, 110]);
-    expect(regressed.measured.median).toBeLessThan(150);
+    // A resolution doing its work twice: 10.27× locally, under the backstop.
+    const regressed = paired([21, 22, 22, 20, 24, 22, 24], [210, 215, 212, 208, 220, 214, 230]);
+    expect(regressed.measured.median).toBeLessThan(RESOLVE_SUITE_BOUND_MS);
     expect(resolutionMisses(regressed)).toEqual([
-      `median 8.92× its same-run baseline, over the ${String(RESOLVE_OVERHEAD_LIMIT)}× limit`,
+      `median 9.73× its same-run baseline, over the ${String(RESOLVE_OVERHEAD_LIMIT)}× limit`,
     ]);
   });
 

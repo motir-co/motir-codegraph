@@ -118,11 +118,15 @@ async function bound<T>(fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
 
 /**
  * The resolution gate's same-run baseline: ONE layer's own rows, path → blob,
- * read in path order by its primary key on the caller's bound transaction and
- * decoded into a Map. It moves the same row count over the same connection
- * under the same row-level security as resolving a commit of that size, and
- * nothing of the chain: so the ratio over it is what the chain costs, and a
- * slow runner slows both sides of it.
+ * read on the caller's bound transaction, SORTED BY PATH IN THE DATABASE'S
+ * COLLATION and decoded into a Map. It is the work any resolution of a map that
+ * size pays — the same row count over the same connection under the same
+ * row-level security, and a 20,000-path sort in the same collation — and
+ * nothing of the chain. `path || ''` keeps the primary key from supplying the
+ * order, so the sort is really done: under a linguistic collation (CI's
+ * `en_US.utf8`) a path comparison costs several times what it does under `C`,
+ * and a baseline that skipped the sort would make the ratio a property of the
+ * collation instead of the statement.
  */
 async function readLayerMap(
   c: pg.ClientBase,
@@ -132,7 +136,7 @@ async function readLayerMap(
   const { rows } = await c.query<{ path: string; git_blob_hash: string }>(
     `SELECT path, git_blob_hash FROM codegraph.layer_paths
      WHERE tenant_id = $1 AND repository_id = $2 AND layer_id = $3
-     ORDER BY path`,
+     ORDER BY path || ''`,
     [on.tenantId, on.repositoryId, layerId],
   );
   return new Map(rows.map((r) => [r.path, r.git_blob_hash]));
