@@ -107,7 +107,12 @@ export async function startSampler(options: {
     async stop() {
       state.stopped = true;
       await loop;
-      await client.end().catch(() => undefined);
+      try {
+        await client.end();
+      } catch {
+        // Closing a connection that is already lost is not a failed reading:
+        // a lost sample was recorded by `fail` when it happened.
+      }
       if (failure !== null) throw failure;
       return {
         intervalMs,
