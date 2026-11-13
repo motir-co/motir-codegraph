@@ -16,13 +16,13 @@ import type pg from 'pg';
 
 import {
   LayerNotStagedError,
-  listRefHeadsNamingLayer,
   markPublished,
   markSuperseded,
   moveRefHead,
   readCurrentPublishedLayer,
   readLayerById,
   readLayerPathsPage,
+  repointRefHeads,
   type LayerScope,
   type RefHeadRow,
 } from '../db/layers.js';
@@ -248,16 +248,7 @@ async function publishInTransaction(
   // Every ref head that named the retired layer follows the commit to its new
   // current layer, as compaction's switch does: a ref head never names a
   // retired layer, so a release can never find a kept chain under it.
-  if (retired !== null) {
-    for (const ref of await listRefHeadsNamingLayer(client, scope, retired.id)) {
-      await moveRefHead(client, {
-        ...scope,
-        refName: ref.refName,
-        layerId: flipped.id,
-        isDefaultBranch: ref.isDefaultBranch,
-      });
-    }
-  }
+  if (retired !== null) await repointRefHeads(client, scope, retired.id, flipped.id);
   return {
     layerId: flipped.id,
     commitSha: flipped.commitSha,

@@ -286,6 +286,21 @@ const REFS_NAMING_LAYER_SQL = `SELECT ${REF_COLUMNS} FROM codegraph.ref_heads
   WHERE tenant_id = $1 AND repository_id = $2 AND layer_id = $3
   ORDER BY ref_name COLLATE "C"`;
 
+// Every ref head still naming `$3` follows to `$4`, in ONE guarded UPDATE: the
+// guard on the ref's current layer is re-checked on the locked row under READ
+// COMMITTED, so a concurrent move of the same ref to another commit (which
+// commits first) is never rolled back by this one. Only a current published
+// layer of the repository is a target, and the commit is the layer's own.
+const REPOINT_REF_HEADS_SQL = `UPDATE codegraph.ref_heads r
+  SET layer_id = l.id, commit_sha = l.commit_sha
+  FROM codegraph.commit_layers l
+  WHERE r.tenant_id = $1 AND r.repository_id = $2 AND r.layer_id = $3
+    AND l.tenant_id = $1 AND l.repository_id = $2 AND l.id = $4
+    AND l.state = 'published' AND l.superseded_at IS NULL
+  RETURNING r.tenant_id AS "tenantId", r.repository_id AS "repositoryId",
+    r.ref_name AS "refName", r.commit_sha AS "commitSha", r.layer_id AS "layerId",
+    r.is_default_branch AS "isDefaultBranch"`;
+
 const REFERENCED_HASHES_SQL = `SELECT DISTINCT git_blob_hash AS "gitBlobHash"
   FROM codegraph.layer_paths
   WHERE tenant_id = $1 AND git_blob_hash IS NOT NULL
@@ -644,6 +659,28 @@ export async function listRefHeadsNamingLayer(
     layerId,
   ]);
   return rows;
+}
+
+/**
+ * Moves every ref head of the repository that names `fromLayerId` to
+ * `toLayerId`, in one statement whose guard is re-checked on each locked row,
+ * so a ref another transaction moved elsewhere in the meantime keeps that move.
+ * Answers the refs moved, ordered by ref name. `toLayerId` must be a current
+ * published layer of the repository, or nothing moves.
+ */
+export async function repointRefHeads(
+  db: pg.ClientBase,
+  scope: LayerScope,
+  fromLayerId: string,
+  toLayerId: string,
+): Promise<RefHeadRow[]> {
+  const { rows } = await db.query<RefHeadRow>(REPOINT_REF_HEADS_SQL, [
+    scope.tenantId,
+    scope.repositoryId,
+    fromLayerId,
+    toLayerId,
+  ]);
+  return rows.sort((a, b) => (a.refName < b.refName ? -1 : a.refName > b.refName ? 1 : 0));
 }
 
 /**

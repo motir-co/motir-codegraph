@@ -26,6 +26,7 @@ import {
   readLayerPathsByLayerIds,
   readLayerPathsPage,
   readRefHead,
+  repointRefHeads,
   UnknownLayerError,
   type LayerRow,
   type LayerScope,
@@ -527,6 +528,52 @@ describe('ref heads', () => {
       expect(await listRefHeadsNamingLayer(c, web, c1.id)).toEqual([]);
       expect(await listRefHeadsNamingLayer(c, api, c2.id)).toEqual([]);
       expect(await listRefHeadsNamingLayer(c, web, randomUUID())).toEqual([]);
+    });
+  });
+
+  it('repoints every ref naming a layer in one guarded statement, never undoing a concurrent move', async () => {
+    const old = await publishedBase(web);
+    const next = await publishedBase(web);
+    const other = await publishedBase(web);
+    await bound(
+      web.tenantId,
+      async (c) => {
+        for (const refName of ['refs/heads/main', 'refs/heads/side']) {
+          await moveRefHead(c, { ...web, refName, layerId: old.id, isDefaultBranch: false });
+        }
+      },
+      commit,
+    );
+    // Another transaction moves main to another commit and holds its row lock.
+    const mover = await pool.connect();
+    try {
+      await mover.query('BEGIN');
+      await mover.query(BIND_TENANT_SQL, [fx.readerId, web.tenantId]);
+      await moveRefHead(mover, {
+        ...web,
+        refName: 'refs/heads/main',
+        layerId: other.id,
+        isDefaultBranch: true,
+      });
+      // The repoint read main as naming `old` before that move committed; it waits on the row.
+      const repoint = bound(web.tenantId, (c) => repointRefHeads(c, web, old.id, next.id), commit);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await mover.query('COMMIT');
+      const moved = await repoint;
+      expect(moved.map((r) => [r.refName, r.layerId, r.commitSha])).toEqual([
+        ['refs/heads/side', next.id, next.commitSha],
+      ]);
+    } finally {
+      mover.release();
+    }
+    await bound(web.tenantId, async (c) => {
+      expect(await readRefHead(c, web, 'refs/heads/main')).toMatchObject({ layerId: other.id });
+      expect(await readRefHead(c, web, 'refs/heads/side')).toMatchObject({
+        layerId: next.id,
+        isDefaultBranch: false,
+      });
+      // A target that is not current moves nothing.
+      expect(await repointRefHeads(c, web, next.id, randomUUID())).toEqual([]);
     });
   });
 

@@ -19,12 +19,11 @@ import type { LayerSettings } from '../config.js';
 import {
   appendLayerPaths,
   insertLayer,
-  listRefHeadsNamingLayer,
   lockTenantShared,
   markPublished,
   markSuperseded,
-  moveRefHead,
   readCurrentPublishedLayer,
+  repointRefHeads,
   type LayerScope,
   type PathEntry,
 } from '../db/layers.js';
@@ -180,14 +179,8 @@ export async function compactLayer(
     // Retire BEFORE publishing: a commit holds one current published layer.
     const retired = await markSuperseded(c, scope, current.id);
     await markPublished(c, scope, start.baseLayerId);
-    for (const ref of await listRefHeadsNamingLayer(c, scope, current.id)) {
-      await moveRefHead(c, {
-        ...scope,
-        refName: ref.refName,
-        layerId: start.baseLayerId,
-        isDefaultBranch: ref.isDefaultBranch,
-      });
-    }
+    // One guarded statement: a ref another commit's publish moved meanwhile keeps that move.
+    await repointRefHeads(c, scope, current.id, start.baseLayerId);
     return {
       outcome: 'compacted',
       baseLayerId: start.baseLayerId,
