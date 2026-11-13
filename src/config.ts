@@ -176,3 +176,54 @@ export function readFetchSettings(env: NodeJS.ProcessEnv = process.env): FetchSe
     allowedHosts: readAllowedHosts(env),
   };
 }
+
+/** How long an idle worker waits before it claims again, when `WORKER_POLL_MS` is unset. */
+export const DEFAULT_WORKER_POLL_MS = 1_000;
+
+/** A claimed job's lease when `JOB_LEASE_MS` is unset: five minutes. */
+export const DEFAULT_JOB_LEASE_MS = 300_000;
+
+/** Claims a job may have before it ends `attempts_exhausted`, when `MAX_ATTEMPTS` is unset. */
+export const DEFAULT_MAX_ATTEMPTS = 3;
+
+/** Missing blobs stored between two lease renewals, when `BLOB_STORE_BATCH_SIZE` is unset. */
+export const DEFAULT_BLOB_STORE_BATCH_SIZE = 500;
+
+/**
+ * The indexer worker's settings: service configuration, the same for every
+ * tenant and repository, read once by the worker process.
+ */
+export interface WorkerSettings {
+  /** Milliseconds an idle worker waits before claiming again. */
+  readonly pollMs: number;
+  /** Milliseconds a claim's lease runs from each renewal. */
+  readonly jobLeaseMs: number;
+  /** The claim at which a job that keeps losing its lease ends `attempts_exhausted`. */
+  readonly maxAttempts: number;
+  /** The directory the worker writes each job's source under; the only path it writes. */
+  readonly scratchDir: string;
+  /** Missing blobs stored between two lease renewals. */
+  readonly blobStoreBatchSize: number;
+}
+
+/**
+ * `WORKER_POLL_MS`, `JOB_LEASE_MS`, `MAX_ATTEMPTS` and `BLOB_STORE_BATCH_SIZE`,
+ * each defaulted when unset or blank and refused naming its variable when it is
+ * not a whole number of 1 or more, and `SCRATCH_DIR`, which is required and
+ * may not be blank. Reads nothing else.
+ */
+export function readWorkerSettings(env: NodeJS.ProcessEnv = process.env): WorkerSettings {
+  const pollMs = readPositiveWhole(env, 'WORKER_POLL_MS', DEFAULT_WORKER_POLL_MS);
+  const jobLeaseMs = readPositiveWhole(env, 'JOB_LEASE_MS', DEFAULT_JOB_LEASE_MS);
+  const maxAttempts = readPositiveWhole(env, 'MAX_ATTEMPTS', DEFAULT_MAX_ATTEMPTS);
+  const blobStoreBatchSize = readPositiveWhole(
+    env,
+    'BLOB_STORE_BATCH_SIZE',
+    DEFAULT_BLOB_STORE_BATCH_SIZE,
+  );
+  const scratchDir = env.SCRATCH_DIR ?? '';
+  if (scratchDir.trim() === '') {
+    throw new Error('SCRATCH_DIR must name the directory the worker writes job sources under.');
+  }
+  return { pollMs, jobLeaseMs, maxAttempts, scratchDir, blobStoreBatchSize };
+}

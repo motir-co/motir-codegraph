@@ -149,6 +149,11 @@ const INSERT_CONTENTS_SQL = `INSERT INTO codegraph.blob_contents (tenant_id, git
 const INSERT_CONTENTS_IF_ABSENT_SQL = `${INSERT_CONTENTS_SQL}
   ON CONFLICT (tenant_id, git_blob_hash) DO NOTHING`;
 
+const MISSING_HASHES_SQL = `SELECT h AS hash FROM unnest($2::text[]) WITH ORDINALITY AS u(h, n)
+  WHERE NOT EXISTS (
+    SELECT 1 FROM codegraph.blob b WHERE b.tenant_id = $1 AND b.git_blob_hash = u.h)
+  ORDER BY n`;
+
 const SELECT_CONTENTS_SQL = `SELECT contents FROM codegraph.blob_contents
   WHERE tenant_id = $1 AND git_blob_hash = $2`;
 
@@ -199,6 +204,21 @@ export async function getBlob(
 ): Promise<BlobRow | null> {
   const { rows } = await db.query<BlobRow>(SELECT_BLOB_SQL, [tenantId, gitBlobHash]);
   return rows[0] ?? null;
+}
+
+/**
+ * The hashes, of those given, the bound tenant holds no blob row for, in the
+ * order given, in ONE statement. A blob row counts whatever its outcome:
+ * binary and refused blobs keep no contents by design. Opens no transaction.
+ */
+export async function listMissingBlobHashes(
+  db: pg.ClientBase,
+  tenantId: string,
+  gitBlobHashes: readonly string[],
+): Promise<string[]> {
+  if (gitBlobHashes.length === 0) return [];
+  const { rows } = await db.query<{ hash: string }>(MISSING_HASHES_SQL, [tenantId, gitBlobHashes]);
+  return rows.map((row) => row.hash);
 }
 
 /**

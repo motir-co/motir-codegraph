@@ -5,6 +5,7 @@ import {
   DEFAULT_FETCH_TIMEOUT_MS,
   DEFAULT_TAR_BYTE_CAP_BYTES,
   readFetchSettings,
+  readWorkerSettings,
   DEFAULT_COMPACTION_THRESHOLD,
   DEFAULT_HARD_CEILING,
   DEFAULT_PER_FILE_CAP_BYTES,
@@ -201,5 +202,47 @@ describe('readFetchSettings', () => {
         new RegExp(`FETCH_ALLOWED_HOSTS.*${bad.replace(/[.*/:]/g, '\\$&')}`),
       );
     }
+  });
+});
+
+describe('readWorkerSettings', () => {
+  it('defaults every numeric setting and requires SCRATCH_DIR', () => {
+    expect(readWorkerSettings({ SCRATCH_DIR: '/scratch' })).toEqual({
+      pollMs: 1_000,
+      jobLeaseMs: 300_000,
+      maxAttempts: 3,
+      scratchDir: '/scratch',
+      blobStoreBatchSize: 500,
+    });
+    expect(
+      readWorkerSettings({
+        SCRATCH_DIR: '/s',
+        WORKER_POLL_MS: '250',
+        JOB_LEASE_MS: '60000',
+        MAX_ATTEMPTS: '5',
+        BLOB_STORE_BATCH_SIZE: '20',
+      }),
+    ).toEqual({
+      pollMs: 250,
+      jobLeaseMs: 60_000,
+      maxAttempts: 5,
+      scratchDir: '/s',
+      blobStoreBatchSize: 20,
+    });
+  });
+
+  it('refuses a malformed number naming its variable, and a missing or blank SCRATCH_DIR', () => {
+    for (const name of [
+      'WORKER_POLL_MS',
+      'JOB_LEASE_MS',
+      'MAX_ATTEMPTS',
+      'BLOB_STORE_BATCH_SIZE',
+    ]) {
+      for (const value of ['0', '-1', '1.5', 'soon']) {
+        expect(() => readWorkerSettings({ SCRATCH_DIR: '/s', [name]: value })).toThrow(name);
+      }
+    }
+    expect(() => readWorkerSettings({})).toThrow('SCRATCH_DIR');
+    expect(() => readWorkerSettings({ SCRATCH_DIR: '  ' })).toThrow('SCRATCH_DIR');
   });
 });

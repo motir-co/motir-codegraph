@@ -610,6 +610,30 @@ export async function readCurrentPublishedLayer(
   return rows[0] ?? null;
 }
 
+const CURRENT_PUBLISHED_COMMITS_SQL = `SELECT commit_sha AS "commitSha" FROM codegraph.commit_layers
+  WHERE tenant_id = $1 AND repository_id = $2 AND state = 'published' AND superseded_at IS NULL
+  ORDER BY published_at DESC, commit_sha
+  LIMIT $3`;
+
+/**
+ * The repository's current published commits, newest published first, at most
+ * `limit`; empty when none is published. One statement. A worker offers these
+ * as ancestors to a commit that carries none of its own, since the service
+ * keeps no clone and its own indexed commits are the only ancestry it holds.
+ */
+export async function listCurrentPublishedCommits(
+  db: pg.ClientBase,
+  scope: LayerScope,
+  limit: number,
+): Promise<string[]> {
+  const { rows } = await db.query<{ commitSha: string }>(CURRENT_PUBLISHED_COMMITS_SQL, [
+    scope.tenantId,
+    scope.repositoryId,
+    positiveBatch('limit', limit),
+  ]);
+  return rows.map((row) => row.commitSha);
+}
+
 /**
  * Every staged layer of one commit in this repository, oldest first; empty when
  * there is none. A commit has at most a handful (a retried job replaces its
