@@ -30,6 +30,23 @@ export interface RegisteredRoute {
   url: string;
 }
 
+/**
+ * The Ajv options every route schema is compiled with. Fastify merges these
+ * over its own defaults, which drop unnamed fields (`removeAdditional: true`)
+ * and convert scalars (`coerceTypes: 'array'`), so both are switched off here:
+ *
+ * - A field a schema does not name is refused, not silently dropped, so a
+ *   caller's typo is a 400 rather than a call that ignored what it sent.
+ * - A value of the wrong type is refused, not converted. A JSON body already
+ *   carries its types, so `7`, `true` or `["x"]` where a string belongs is the
+ *   caller's mistake and a 400, never stored as `"7"`, `"true"` or `"x"`.
+ *   Path parameters are strings on the wire and every schema for them says
+ *   `string`, so they lose nothing. A querystring or header schema compiled
+ *   by this validator sees strings too: one that wants a number declares a
+ *   string and parses it, since nothing converts it.
+ */
+const STRICT_AJV_OPTIONS = { removeAdditional: false, coerceTypes: false } as const;
+
 const ROUTES = Symbol('registeredRoutes');
 
 type RecordingApp = FastifyInstance & { [ROUTES]?: RegisteredRoute[] };
@@ -42,9 +59,7 @@ type RecordingApp = FastifyInstance & { [ROUTES]?: RegisteredRoute[] };
 export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
   const app: RecordingApp = Fastify({
     logger: options.logger ?? false,
-    // A field a schema does not name is refused, not silently dropped, so a
-    // caller's typo is a 400 rather than a call that ignored what it sent.
-    ajv: { customOptions: { removeAdditional: false } },
+    ajv: { customOptions: STRICT_AJV_OPTIONS },
     // Only these peers' X-Forwarded-For is read; a hop count is not offered,
     // since it cannot tell a proxy from a direct caller (Fastify ignores one).
     trustProxy:

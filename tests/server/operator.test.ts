@@ -208,6 +208,57 @@ describe('refusals of the operator calls', () => {
     ).toBe(false);
   });
 
+  // Every operator body route, a body it accepts, and each of that body's
+  // fields: all of them are strings, so each is sent once as a value of
+  // every other JSON type a coercing validator would turn into a string.
+  const bodyRoutes: readonly [path: string, valid: Record<string, string>][] = [
+    ['/v1/operator/tenants', { displayName: 'Initech' }],
+    ['/v1/operator/repositories', { tenantId: randomUUID(), displayName: 'initech-tps' }],
+    ['/v1/operator/clients', { name: 'a client', kind: 'client' }],
+    ['/v1/operator/grants', { clientId: randomUUID(), tenantId: randomUUID() }],
+    ['/v1/operator/grants/revoke', { clientId: randomUUID(), tenantId: randomUUID() }],
+  ];
+  const wrongTypes: readonly [label: string, value: unknown][] = [
+    ['a number', 7],
+    ['a boolean', true],
+    ['a one-element array', ['x']],
+    ['null', null],
+    ['an object', { value: 'x' }],
+  ];
+  it.each(
+    bodyRoutes.flatMap(([path, valid]) =>
+      Object.keys(valid).flatMap((field) =>
+        wrongTypes.map(
+          ([label, value]) => [path, field, label, { ...valid, [field]: value }] as const,
+        ),
+      ),
+    ),
+  )(
+    'answer %s with %s as %s 400 invalid_request, storing nothing',
+    async (path, field, _label, body) => {
+      const before = await snapshot();
+      log.clear();
+      const response = await asOperator(path, body);
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: { code: 'invalid_request', message: expect.stringContaining(field) as string },
+      });
+      expect(
+        log.texts().some((text) => text.includes('codegraph_') && !text.includes('authenticate')),
+      ).toBe(false);
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+
+  it('store a displayName exactly as sent once it is a string', async () => {
+    const response = await asOperator('/v1/operator/tenants', { displayName: '7' });
+    expect(response.status).toBe(201);
+    const { tenantId } = response.body as { tenantId: string };
+    expect(
+      await owner('SELECT display_name FROM codegraph.tenants WHERE id = $1', [tenantId]),
+    ).toEqual([{ display_name: '7' }]);
+  });
+
   it('answer a non-uuid :clientId 400 invalid_request', async () => {
     const response = await asOperator('/v1/operator/clients/not-a-uuid', undefined, 'GET');
     expect(response.status).toBe(400);
