@@ -68,12 +68,14 @@ applied 0003_operator_client_read.sql
 applied 0004_delete_functions.sql
 applied 0005_blob_and_contents.sql
 applied 0006_blob_fact.sql
+applied 0007_commit_layers.sql
+applied 0008_blob_fact_text_whitespace.sql
 ```
 
 The second applies nothing:
 
 ```text
-nothing to apply (6 already applied)
+nothing to apply (8 already applied)
 ```
 
 `pnpm test` then runs the suite against the same Postgres; every test creates and
