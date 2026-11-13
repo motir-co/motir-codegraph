@@ -201,7 +201,7 @@ describe('readFetchSettings', () => {
       '*.internal',
     ]) {
       expect(() => readFetchSettings({ FETCH_ALLOWED_HOSTS: `ok.host, ${bad}` })).toThrow(
-        new RegExp(`FETCH_ALLOWED_HOSTS.*${bad.replace(/[.*/:]/g, '\\$&')}`),
+        new RegExp(`FETCH_ALLOWED_HOSTS.*${bad.replace(/[\\^$.*+?()[\]{}|/:]/g, '\\$&')}`),
       );
     }
   });

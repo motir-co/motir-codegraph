@@ -357,7 +357,7 @@ beforeAll(async () => {
   db = await freshDatabase();
   owner = new pg.Client({ connectionString: db.ownerUrl });
   await owner.connect();
-  server = await startTarballServer();
+  server = await startTarballServer({ originHost: '127.0.0.1' });
   scratch = await mkdtemp(join(tmpdir(), 'queue-recipe-'));
   api = await startServerProcess(db.appUrl);
 }, CASE_MS);

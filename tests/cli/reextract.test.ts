@@ -187,6 +187,12 @@ function succeeded(result: CommandResult): string[] {
 const PY = (n: number) => `def f${String(n)}():\n    return g(${String(n)})\n`;
 const TS = (n: number) => `export function f${String(n)}() { return g(${String(n)}); }\n`;
 
+/**
+ * Node's own line when `--env-file-if-exists` finds no .env (CI has none): the
+ * runtime's, printed before the command runs, so not the command's output.
+ */
+const NO_ENV_FILE_NOTICE = /^\.env not found\. Continuing without it\S*\n?/m;
+
 describe('pnpm reextract', () => {
   it(
     'prints its usage without reading DATABASE_URL',
@@ -197,7 +203,7 @@ describe('pnpm reextract', () => {
         expect(help.stdout).toContain('usage: pnpm reextract');
         expect(help.stdout).toContain('--language <id>');
         expect(help.stdout).toContain('codegraph_owner');
-        expect(help.stderr).toBe('');
+        expect(help.stderr.replace(NO_ENV_FILE_NOTICE, '')).toBe('');
       }
     },
     PROCESS_TIMEOUT_MS,

@@ -347,7 +347,7 @@ describe('pnpm worker', () => {
   let server: TarballServer;
 
   beforeAll(async () => {
-    server = await startTarballServer();
+    server = await startTarballServer({ originHost: '127.0.0.1' });
   });
 
   afterAll(async () => {
@@ -359,7 +359,7 @@ describe('pnpm worker', () => {
     SCRATCH_DIR: scratch,
     WORKER_POLL_MS: '20',
     NODE_EXTRA_CA_CERTS: server.caFile,
-    FETCH_ALLOWED_HOSTS: 'localhost',
+    FETCH_ALLOWED_HOSTS: new URL(server.origin).hostname,
     ...overrides,
   });
 

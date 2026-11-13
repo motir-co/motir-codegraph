@@ -11,6 +11,13 @@ import { X509Certificate } from 'node:crypto';
 // that runs a job end to end. Its certificate is committed under certs/ (long
 // dated, for localhost, 127.0.0.1 and ::1); an in-process fetch trusts it
 // through `ca` (the PEM), a child process through NODE_EXTRA_CA_CERTS (`caFile`).
+//
+// It listens on 127.0.0.1 only. An in-process fetch pins `localhost` there with
+// its own resolver; a fetch through the system resolver (a worker process, or
+// the real fetcher's default) does not, and the fetcher connects to the FIRST
+// address a name resolves to — on a host whose `localhost` answers ::1 first
+// (GitHub's runners) that is a port nobody listens on. Such a fetch takes
+// `originHost: '127.0.0.1'`: an IP literal, never resolved, on the certificate.
 
 const CERTS = join(fileURLToPath(new URL('.', import.meta.url)), 'certs');
 /** The committed certificate's file, for a child process's NODE_EXTRA_CA_CERTS. */
@@ -20,7 +27,7 @@ const KEY_FILE = join(CERTS, 'tarball-server-key.pem');
 export type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 
 export interface TarballServer {
-  /** `https://localhost:<port>` — no trailing slash. */
+  /** `https://<originHost>:<port>` — no trailing slash. */
   readonly origin: string;
   readonly port: number;
   /** The certificate as PEM, for an in-process fetch's `tls.ca`. */
@@ -50,7 +57,18 @@ export function assertCertificateCurrent(pem: string, now = new Date()): void {
   }
 }
 
-export async function startTarballServer(): Promise<TarballServer> {
+export interface TarballServerOptions {
+  /**
+   * The host every URL it answers names: `localhost` (the default) for a fetch
+   * that pins the name with its own resolver, `127.0.0.1` for one that resolves
+   * through the system and must not depend on its address order.
+   */
+  readonly originHost?: 'localhost' | '127.0.0.1';
+}
+
+export async function startTarballServer(
+  options: TarballServerOptions = {},
+): Promise<TarballServer> {
   const ca = readFileSync(TARBALL_SERVER_CA_FILE, 'utf8');
   assertCertificateCurrent(ca);
   const routes = new Map<string, Handler>();
@@ -61,7 +79,8 @@ export async function startTarballServer(): Promise<TarballServer> {
       const path = req.url ?? '/';
       requests.push({ path, host: req.headers.host });
       const handler = routes.get(path.split('?')[0] ?? path);
-      if (handler === undefined) {
+      // The path is the client's: only a registered handler is ever called.
+      if (typeof handler !== 'function') {
         res.writeHead(404).end('not found');
         return;
       }
@@ -70,7 +89,7 @@ export async function startTarballServer(): Promise<TarballServer> {
   );
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
-  const origin = `https://localhost:${String(port)}`;
+  const origin = `https://${options.originHost ?? 'localhost'}:${String(port)}`;
   const route = (path: string, handler: Handler) => {
     routes.set(path, handler);
     return `${origin}${path}`;
