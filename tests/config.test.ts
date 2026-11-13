@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  DEFAULT_FETCH_BYTE_CAP_BYTES,
+  DEFAULT_FETCH_TIMEOUT_MS,
+  DEFAULT_TAR_BYTE_CAP_BYTES,
+  readFetchSettings,
   DEFAULT_COMPACTION_THRESHOLD,
   DEFAULT_HARD_CEILING,
   DEFAULT_PER_FILE_CAP_BYTES,
@@ -141,6 +145,61 @@ describe('readLayerSettings', () => {
     } finally {
       if (before === undefined) delete process.env.HARD_CEILING;
       else process.env.HARD_CEILING = before;
+    }
+  });
+});
+
+describe('readFetchSettings', () => {
+  it('defaults the three numbers when unset or blank, and allows no host', () => {
+    for (const env of [
+      {},
+      { FETCH_BYTE_CAP_BYTES: '', TAR_BYTE_CAP_BYTES: ' ', FETCH_TIMEOUT_MS: '' },
+    ]) {
+      expect(readFetchSettings(env)).toEqual({
+        byteCapBytes: DEFAULT_FETCH_BYTE_CAP_BYTES,
+        tarByteCapBytes: DEFAULT_TAR_BYTE_CAP_BYTES,
+        timeoutMs: DEFAULT_FETCH_TIMEOUT_MS,
+        allowedHosts: [],
+      });
+    }
+    // Above a motir-core-sized archive; the timeout well below the 10-minute target.
+    expect(DEFAULT_FETCH_BYTE_CAP_BYTES).toBe(256 * 1024 * 1024);
+    expect(DEFAULT_TAR_BYTE_CAP_BYTES).toBe(1024 * 1024 * 1024);
+    expect(DEFAULT_FETCH_TIMEOUT_MS).toBeLessThan(600_000);
+  });
+
+  it('reads each number, and refuses one that is not a positive whole number, naming it', () => {
+    expect(
+      readFetchSettings({
+        FETCH_BYTE_CAP_BYTES: '1000',
+        TAR_BYTE_CAP_BYTES: '2000',
+        FETCH_TIMEOUT_MS: '3000',
+      }),
+    ).toMatchObject({ byteCapBytes: 1000, tarByteCapBytes: 2000, timeoutMs: 3000 });
+    for (const name of ['FETCH_BYTE_CAP_BYTES', 'TAR_BYTE_CAP_BYTES', 'FETCH_TIMEOUT_MS']) {
+      for (const bad of ['0', '-1', '1.5', 'lots']) {
+        expect(() => readFetchSettings({ [name]: bad })).toThrow(name);
+      }
+    }
+  });
+
+  it('reads the allowed hosts as bare, lower-cased names, dropping empty entries', () => {
+    expect(
+      readFetchSettings({ FETCH_ALLOWED_HOSTS: ' Git.Internal ,, source-host,localhost,' })
+        .allowedHosts,
+    ).toEqual(['git.internal', 'source-host', 'localhost']);
+  });
+
+  it('refuses an allowed host carrying a scheme, a port, a path or a wildcard, naming the variable and the entry', () => {
+    for (const bad of [
+      'https://git.internal',
+      'git.internal:8443',
+      'git.internal/repo',
+      '*.internal',
+    ]) {
+      expect(() => readFetchSettings({ FETCH_ALLOWED_HOSTS: `ok.host, ${bad}` })).toThrow(
+        new RegExp(`FETCH_ALLOWED_HOSTS.*${bad.replace(/[.*/:]/g, '\\$&')}`),
+      );
     }
   });
 });

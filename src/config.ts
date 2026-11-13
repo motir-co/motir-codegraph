@@ -111,3 +111,68 @@ export function readLayerSettings(env: NodeJS.ProcessEnv = process.env): LayerSe
   }
   return { compactionThreshold, hardCeiling, stagedLayerStaleness };
 }
+
+/** The compressed-source cap when `FETCH_BYTE_CAP_BYTES` is unset: 256 MiB. */
+export const DEFAULT_FETCH_BYTE_CAP_BYTES = 268_435_456;
+
+/** The extracted-bytes cap when `TAR_BYTE_CAP_BYTES` is unset: 1 GiB. */
+export const DEFAULT_TAR_BYTE_CAP_BYTES = 1_073_741_824;
+
+/** The whole-fetch deadline when `FETCH_TIMEOUT_MS` is unset: two minutes. */
+export const DEFAULT_FETCH_TIMEOUT_MS = 120_000;
+
+/**
+ * The fetcher's four settings (src/fetch): service configuration, the same for
+ * every tenant and repository, read once by the process that fetches.
+ */
+export interface FetchSettings {
+  /** Bytes. A source archive larger than this, declared or streamed, is refused. */
+  readonly byteCapBytes: number;
+  /** Bytes. An archive whose regular files extract to more than this is refused. */
+  readonly tarByteCapBytes: number;
+  /** Milliseconds for the whole fetch: every redirect, the download, the extraction and the hash. */
+  readonly timeoutMs: number;
+  /**
+   * Lower-cased bare host names whose addresses may be loopback or private (a
+   * source host inside the deployment's own network). Never exempts the
+   * link-local and instance-metadata ranges.
+   */
+  readonly allowedHosts: readonly string[];
+}
+
+/**
+ * `FETCH_ALLOWED_HOSTS`: comma-separated bare host names, matched
+ * case-insensitively, empty entries dropped. An entry carrying a scheme, a
+ * port, a path or a wildcard is a configuration error naming the variable and
+ * the entry.
+ */
+function readAllowedHosts(env: NodeJS.ProcessEnv): string[] {
+  const raw = env.FETCH_ALLOWED_HOSTS ?? '';
+  const hosts: string[] = [];
+  for (const entry of raw.split(',')) {
+    const host = entry.trim().toLowerCase();
+    if (host === '') continue;
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(host)) {
+      throw new Error(
+        `FETCH_ALLOWED_HOSTS entries must be bare host names (no scheme, port, path or wildcard), not ${entry.trim()}.`,
+      );
+    }
+    hosts.push(host);
+  }
+  return hosts;
+}
+
+/**
+ * `FETCH_BYTE_CAP_BYTES`, `TAR_BYTE_CAP_BYTES` and `FETCH_TIMEOUT_MS`, each
+ * defaulted when unset or blank (256 MiB, 1 GiB and 120,000 ms) and refused
+ * naming its variable when it is not a whole number of 1 or more, and
+ * `FETCH_ALLOWED_HOSTS`. Reads nothing else.
+ */
+export function readFetchSettings(env: NodeJS.ProcessEnv = process.env): FetchSettings {
+  return {
+    byteCapBytes: readPositiveWhole(env, 'FETCH_BYTE_CAP_BYTES', DEFAULT_FETCH_BYTE_CAP_BYTES),
+    tarByteCapBytes: readPositiveWhole(env, 'TAR_BYTE_CAP_BYTES', DEFAULT_TAR_BYTE_CAP_BYTES),
+    timeoutMs: readPositiveWhole(env, 'FETCH_TIMEOUT_MS', DEFAULT_FETCH_TIMEOUT_MS),
+    allowedHosts: readAllowedHosts(env),
+  };
+}

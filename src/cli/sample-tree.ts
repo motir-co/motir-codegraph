@@ -18,7 +18,6 @@
 // The store and show modes refuse, before writing or reading anything, a
 // client that holds no live grant on the tenant: a tenant id alone binds
 // nothing (docs/schema-contract.md §4).
-import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +26,7 @@ import { parseArgs } from 'node:util';
 import pg from 'pg';
 
 import { requireEnv } from '../config.js';
+import { gitBlobHash } from '../fetch/gitBlob.js';
 import { reextractLanguage } from '../indexing/reextract.js';
 import { storeBlob, type StoredBlob } from '../indexing/storeBlob.js';
 import { BIND_TENANT_SQL } from '../server/binding.js';
@@ -57,13 +57,6 @@ function walk(root: string): string[] {
 }
 
 /** `git hash-object`: SHA-1 over `blob <length>\0` and the bytes. */
-function gitBlobHash(bytes: Buffer): string {
-  return createHash('sha1')
-    .update(`blob ${String(bytes.length)}\0`)
-    .update(bytes)
-    .digest('hex');
-}
-
 function required(values: Record<string, unknown>, name: string): string {
   const value = values[name];
   if (typeof value !== 'string' || value === '') {

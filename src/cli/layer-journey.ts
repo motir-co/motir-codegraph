@@ -30,6 +30,7 @@ import { readLayerSettings, requireEnv, type LayerSettings } from '../config.js'
 import { listReferencedBlobHashes, readCurrentPublishedLayer } from '../db/layers.js';
 import { migrate } from '../db/migrate.js';
 import { bootstrapOperator } from '../db/operator.js';
+import { gitBlobHash } from '../fetch/gitBlob.js';
 import { storeBlob } from '../indexing/storeBlob.js';
 import { compactLayer } from '../layers/compact.js';
 import { discardStaleLayers } from '../layers/discard.js';
@@ -65,16 +66,10 @@ class StepFailed extends Error {
 
 type Tree = Map<string, string>; // path → contents
 
-function gitBlobHash(contents: string): string {
-  const bytes = Buffer.from(contents, 'utf8');
-  return createHash('sha1')
-    .update(`blob ${String(bytes.length)}\0`)
-    .update(bytes)
-    .digest('hex');
-}
-
 function hashes(tree: Tree): Map<string, string> {
-  return new Map([...tree].map(([path, contents]) => [path, gitBlobHash(contents)]));
+  return new Map(
+    [...tree].map(([path, contents]) => [path, gitBlobHash(Buffer.from(contents, 'utf8'))]),
+  );
 }
 
 /** A fixed, printable commit label, as git would show it: forty hex characters. */
@@ -174,7 +169,7 @@ async function store(j: Journey, tree: Tree, paths: Iterable<string>): Promise<n
       const stored = await storeBlob(c, {
         tenantId: j.tenantId,
         clientId: j.clientId,
-        gitBlobHash: gitBlobHash(contents),
+        gitBlobHash: gitBlobHash(Buffer.from(contents, 'utf8')),
         path,
         bytes: Buffer.from(contents, 'utf8'),
       });
@@ -555,7 +550,9 @@ async function runLayerJourney(
     );
     check(
       6,
-      released6.blobHashes.includes(gitBlobHash(c3Tree.get('src/stored-then-killed.ts') as string)),
+      released6.blobHashes.includes(
+        gitBlobHash(Buffer.from(c3Tree.get('src/stored-then-killed.ts') as string, 'utf8')),
+      ),
       'the blob only the killed job stored was not released',
     );
     check(6, sameMap(m2six, m2), 'C2 resolves differently after the discard and release');
