@@ -1,4 +1,3 @@
-import { Ajv } from 'ajv';
 import type { FastifyReply, FastifyRequest, FastifySchema } from 'fastify';
 
 import { enqueueJob, JobKind, supersedeQueuedPushes } from '../../db/indexJobs.js';
@@ -41,25 +40,12 @@ const changedPaths = {
 } as const;
 
 /**
- * These routes' own validator: the app's Ajv coerces types (Fastify's
- * default), which would accept `"true"` for `isDefaultBranch` and a bare
- * string for `changedPaths`. A JSON body has its types already, so here a
- * value of the wrong type is refused rather than converted, and an unnamed
- * field is refused rather than dropped.
+ * Validated by the app's Ajv (`buildApp`), which neither converts a value of
+ * the wrong type nor drops an unnamed field: `"true"` for `isDefaultBranch`
+ * or a bare string for `changedPaths` is a 400, as is a field not named here.
  */
-const strictAjv = new Ajv({ coerceTypes: false, removeAdditional: false, allErrors: false });
-
-function routeSchema(
-  params: object,
-  body: object,
-): {
-  schema: FastifySchema;
-  validatorCompiler: (route: { schema: object }) => ReturnType<Ajv['compile']>;
-} {
-  return {
-    schema: { params, body },
-    validatorCompiler: ({ schema }) => strictAjv.compile(schema),
-  };
+function routeSchema(params: object, body: object): { schema: FastifySchema } {
+  return { schema: { params, body } };
 }
 
 function objectSchema(properties: Record<string, unknown>) {
