@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { DEFAULT_HARD_CEILING, type WorkerSettings } from '../../src/config.js';
+import { DEFAULT_HARD_CEILING, readLayerSettings, type WorkerSettings } from '../../src/config.js';
 import { gitBlobHash } from '../../src/fetch/gitBlob.js';
 import { enqueueJob } from '../../src/db/indexJobs.js';
 import { listCurrentPublishedCommits } from '../../src/db/layers.js';
@@ -90,7 +90,7 @@ function deps(fetch: FetchStep, overrides: Partial<RunJobDeps> = {}): RunJobDeps
   return {
     pool,
     settings: settings(),
-    layerSettings: { hardCeiling: DEFAULT_HARD_CEILING },
+    layerSettings: readLayerSettings({}),
     fetch,
     log,
     ...overrides,
@@ -485,6 +485,22 @@ describe('an error thrown out of the run', () => {
   });
 
   it('ends a kind with no runner internal_error, naming the kind', async () => {
+    const { claim } = await enqueueAndClaim({ kind: 'push' });
+    const runners = JOB_RUNNERS as Record<string, unknown>;
+    const push = runners.push;
+    runners.push = undefined;
+    try {
+      expect(await runJob(deps(serve(TREE)), claim)).toEqual({
+        outcome: 'failed',
+        reasonCode: 'internal_error',
+      });
+    } finally {
+      runners.push = push;
+    }
+    expect((await job(claim.jobId))?.failure_message).toContain('job kind push');
+  });
+
+  it('hands a maintenance kind to its runner rather than the request path', async () => {
     await owner.query(
       `INSERT INTO codegraph.index_jobs (tenant_id, repository_id, client_id, kind)
        VALUES ($1, $2, $3, 'release')`,
@@ -492,11 +508,11 @@ describe('an error thrown out of the run', () => {
     );
     const claim = (await claimNext(pool, settings())) as Claim;
     expect(JOB_RUNNERS.release).toBeUndefined();
-    expect(await runJob(deps(serve(TREE)), claim)).toEqual({
-      outcome: 'failed',
-      reasonCode: 'internal_error',
+    expect(await runJob(deps(serve(TREE)), claim)).toMatchObject({
+      outcome: 'maintained',
+      answer: { kind: 'release', result: { layerIds: [], blobHashes: [] } },
     });
-    expect((await job(claim.jobId))?.failure_message).toContain('job kind release');
+    expect((await job(claim.jobId))?.state).toBe('succeeded');
   });
 
   it('maps the publish refusals to their reason codes', () => {

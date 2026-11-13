@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { DEFAULT_HARD_CEILING, type WorkerSettings } from '../../src/config.js';
+import { DEFAULT_HARD_CEILING, readLayerSettings, type WorkerSettings } from '../../src/config.js';
 import {
   ClaimLostError,
   insertJobBatches,
@@ -68,7 +68,7 @@ function deps(fetch: FetchStep, overrides: Partial<RunJobDeps> = {}): RunJobDeps
   return {
     pool,
     settings: settings(),
-    layerSettings: { hardCeiling: DEFAULT_HARD_CEILING },
+    layerSettings: readLayerSettings({}),
     fetch,
     log: capturingLogger(lines),
     ...overrides,

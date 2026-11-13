@@ -51,7 +51,7 @@ import {
 import {
   checkpoint,
   discardScratch,
-  endClaimedJob,
+  endJobSucceeded,
   failureOf,
   fetchJobTree,
   idsOf,
@@ -406,7 +406,7 @@ export async function finaliseJob(deps: RunJobDeps, claim: Claim): Promise<RunRe
         'publish refused, but the commit has a current layer: the job succeeded',
       );
     }
-    if (!(await endClaimedJob(deps, claim, { state: 'succeeded' }))) {
+    if (!(await endJobSucceeded(deps, claim, job))) {
       throw new LeaseLostError(claim.jobId);
     }
     deps.log.info(idsOf(claim, job), 'job succeeded');

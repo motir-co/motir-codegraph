@@ -230,3 +230,37 @@ export function readWorkerSettings(env: NodeJS.ProcessEnv = process.env): Worker
   }
   return { pollMs, jobLeaseMs, maxAttempts, scratchDir, blobStoreBatchSize };
 }
+
+/** The least time between two maintenance ticks of one repository, by default. */
+export const DEFAULT_MAINTENANCE_INTERVAL_MS = 60_000;
+
+/** The most maintenance jobs one tick enqueues, when `MAINTENANCE_JOBS_PER_TICK` is unset. */
+export const DEFAULT_MAINTENANCE_JOBS_PER_TICK = 3;
+
+/**
+ * How often the worker's maintenance tick looks at a repository, and how much
+ * one look may enqueue: service configuration, the same for every tenant and
+ * repository, read once by the worker process.
+ */
+export interface MaintenanceSettings {
+  /** Milliseconds between two ticks for the same repository, at least. */
+  readonly intervalMs: number;
+  /** Jobs one tick enqueues, at most. */
+  readonly jobsPerTick: number;
+}
+
+/**
+ * `MAINTENANCE_INTERVAL_MS` and `MAINTENANCE_JOBS_PER_TICK`, each defaulted
+ * when unset or blank (60,000 ms and 3) and refused naming its variable when
+ * it is not a whole number of 1 or more. Reads nothing else.
+ */
+export function readMaintenanceSettings(env: NodeJS.ProcessEnv = process.env): MaintenanceSettings {
+  return {
+    intervalMs: readPositiveWhole(env, 'MAINTENANCE_INTERVAL_MS', DEFAULT_MAINTENANCE_INTERVAL_MS),
+    jobsPerTick: readPositiveWhole(
+      env,
+      'MAINTENANCE_JOBS_PER_TICK',
+      DEFAULT_MAINTENANCE_JOBS_PER_TICK,
+    ),
+  };
+}

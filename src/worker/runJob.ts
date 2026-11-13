@@ -31,6 +31,11 @@ import {
   type PublishedLayer,
 } from '../layers/publish.js';
 import { fanOutJob, type MissingBlob } from './fanOut.js';
+import {
+  enqueueCompactionIfDue,
+  runMaintenanceJob,
+  type MaintenanceAnswer,
+} from './maintenance.js';
 import { PRE_LAYER_CHECKS, runPreLayerChecks, type PreLayerCheck } from './preLayerCheck.js';
 
 /** Published commits offered as ancestors after a job's own, at most. */
@@ -85,7 +90,10 @@ export interface RunJobDeps {
   /** A `codegraph_app` pool. */
   readonly pool: pg.Pool;
   readonly settings: WorkerSettings;
-  readonly layerSettings: Pick<LayerSettings, 'hardCeiling'>;
+  readonly layerSettings: Pick<
+    LayerSettings,
+    'hardCeiling' | 'compactionThreshold' | 'stagedLayerStaleness'
+  >;
   readonly fetch: FetchStep;
   readonly log: WorkerLogger;
   /** The pre-layer checks; `PRE_LAYER_CHECKS` when omitted. */
@@ -102,6 +110,8 @@ export type RunResult =
   | { readonly outcome: 'lease_lost' }
   /** The job's client holds no live grant: the row can be neither read nor written. */
   | { readonly outcome: 'grant_lost' }
+  /** A maintenance job ran its library call; `answer` is what the library said. */
+  | { readonly outcome: 'maintained'; readonly answer: MaintenanceAnswer }
   /** The job's missing blobs were written as `batches` batch rows; the job runs on in them. */
   | { readonly outcome: 'fanned_out'; readonly batches: number }
   /**
@@ -451,6 +461,32 @@ export async function endClaimedJob(deps: RunJobDeps, claim: Claim, end: JobEnd)
 }
 
 /**
+ * Ends a job `succeeded` and, in the SAME bound transaction, enqueues a
+ * `compact` job for its commit when the publish left the commit's current
+ * layer deeper than the compaction threshold. False when the claim no longer
+ * holds the job, in which case nothing is written.
+ */
+export async function endJobSucceeded(
+  deps: RunJobDeps,
+  claim: Claim,
+  job: JobRow,
+): Promise<boolean> {
+  try {
+    await inClaimTransaction(deps.pool, claim, async (db) => {
+      await endJob(db, scopeOf(claim), claim.jobId, claim.claimedBy, { state: 'succeeded' });
+      const compactJobId = await enqueueCompactionIfDue(db, deps.layerSettings, job);
+      if (compactJobId !== null) {
+        deps.log.info({ ...idsOf(claim, job), compactJobId }, 'compaction enqueued');
+      }
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof ClaimLostError) return false;
+    throw error;
+  }
+}
+
+/**
  * Runs one claimed job to its recorded outcome. Never throws for the job's
  * own failure: a refusal or an error ends the row `failed` with its reason
  * (when the claim still holds it), a lost lease or grant writes nothing, and
@@ -463,6 +499,18 @@ export async function runJob(deps: RunJobDeps, claim: Claim): Promise<RunResult>
     try {
       job = await readClaimedJob(deps, claim);
       deps.log.info(idsOf(claim, job), 'job started');
+      const maintained = await runMaintenanceJob(deps, claim, job);
+      if (maintained.handled) {
+        const { answer } = maintained;
+        if (!(await endClaimedJob(deps, claim, { state: 'succeeded' }))) {
+          throw new LeaseLostError(claim.jobId);
+        }
+        deps.log.info(
+          { ...idsOf(claim, job), outcome: summary(answer) },
+          'maintenance job succeeded',
+        );
+        return { outcome: 'maintained', answer };
+      }
       const runner = JOB_RUNNERS[job.kind];
       if (runner === undefined) {
         throw new JobFailure('internal_error', `No runner is registered for job kind ${job.kind}.`);
@@ -473,7 +521,7 @@ export async function runJob(deps: RunJobDeps, claim: Claim): Promise<RunResult>
         return { outcome: 'fanned_out', batches: ran.fannedOut };
       }
       const { storedBlobs } = ran;
-      if (!(await endClaimedJob(deps, claim, { state: 'succeeded' }))) {
+      if (!(await endJobSucceeded(deps, claim, job))) {
         throw new LeaseLostError(claim.jobId);
       }
       deps.log.info({ ...idsOf(claim, job), storedBlobs }, 'job succeeded');
@@ -483,6 +531,18 @@ export async function runJob(deps: RunJobDeps, claim: Claim): Promise<RunResult>
     }
   } finally {
     await discardScratch(dir);
+  }
+}
+
+/** A maintenance answer in one loggable line. */
+function summary(answer: MaintenanceAnswer): string {
+  switch (answer.kind) {
+    case 'compact':
+      return answer.result.outcome;
+    case 'discard_stale':
+      return `${String(answer.result.layerIds.length)} layer(s) discarded`;
+    case 'release':
+      return `${String(answer.result.layerIds.length)} layer(s), ${String(answer.result.blobHashes.length)} blob(s) released`;
   }
 }
 

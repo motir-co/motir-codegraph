@@ -6,7 +6,11 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { DEFAULT_HARD_CEILING, type WorkerSettings } from '../../src/config.js';
+import {
+  readLayerSettings,
+  readMaintenanceSettings,
+  type WorkerSettings,
+} from '../../src/config.js';
 import { listMissingBlobHashes } from '../../src/db/blobs.js';
 import { enqueueJob, insertJobBatches } from '../../src/db/indexJobs.js';
 import { CLAIM_SQL, claimNext, inClaimTransaction, type Claim } from '../../src/db/workerJobs.js';
@@ -76,7 +80,8 @@ function loopDeps(overrides: Partial<WorkerLoopDeps> = {}): WorkerLoopDeps {
   return {
     pool,
     settings: settings(),
-    layerSettings: { hardCeiling: DEFAULT_HARD_CEILING },
+    layerSettings: readLayerSettings({}),
+    maintenance: readMaintenanceSettings({}),
     fetch: serveOne,
     log: logger,
     ...overrides,

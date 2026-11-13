@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { DEFAULT_HARD_CEILING, type WorkerSettings } from '../../src/config.js';
+import {
+  readLayerSettings,
+  readMaintenanceSettings,
+  type WorkerSettings,
+} from '../../src/config.js';
 import {
   ClaimLostError,
   finishBatch,
@@ -68,7 +72,8 @@ function startLoops(fetch: FetchStep, count: number, ran: RunResult[]): WorkerLo
     runWorkerLoop({
       pool,
       settings: settings(),
-      layerSettings: { hardCeiling: DEFAULT_HARD_CEILING },
+      layerSettings: readLayerSettings({}),
+      maintenance: readMaintenanceSettings({}),
       fetch,
       log: capturingLogger(lines),
       onTick: (tick: TickContext) => {
@@ -272,7 +277,7 @@ describe('a batch write bound to the wrong tenant', () => {
       {
         pool,
         settings: settings(),
-        layerSettings: { hardCeiling: DEFAULT_HARD_CEILING },
+        layerSettings: readLayerSettings({}),
         fetch: serveTree(bigTree(6)),
         log: capturingLogger(lines),
       },

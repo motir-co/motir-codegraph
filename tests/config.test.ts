@@ -12,6 +12,7 @@ import {
   DEFAULT_STAGED_LAYER_STALENESS_MS,
   perFileCapBytes,
   readLayerSettings,
+  readMaintenanceSettings,
   requireEnv,
 } from '../src/config.js';
 
@@ -244,5 +245,25 @@ describe('readWorkerSettings', () => {
     }
     expect(() => readWorkerSettings({})).toThrow('SCRATCH_DIR');
     expect(() => readWorkerSettings({ SCRATCH_DIR: '  ' })).toThrow('SCRATCH_DIR');
+  });
+});
+
+describe('readMaintenanceSettings', () => {
+  it('defaults both settings when unset or blank, and reads whole numbers', () => {
+    expect(readMaintenanceSettings({})).toEqual({ intervalMs: 60_000, jobsPerTick: 3 });
+    expect(
+      readMaintenanceSettings({ MAINTENANCE_INTERVAL_MS: ' ', MAINTENANCE_JOBS_PER_TICK: '' }),
+    ).toEqual({ intervalMs: 60_000, jobsPerTick: 3 });
+    expect(
+      readMaintenanceSettings({ MAINTENANCE_INTERVAL_MS: '5000', MAINTENANCE_JOBS_PER_TICK: '1' }),
+    ).toEqual({ intervalMs: 5_000, jobsPerTick: 1 });
+  });
+
+  it('refuses a value that is not a whole number of 1 or more, naming its variable', () => {
+    for (const name of ['MAINTENANCE_INTERVAL_MS', 'MAINTENANCE_JOBS_PER_TICK']) {
+      for (const bad of ['0', '-1', '1.5', 'ten']) {
+        expect(() => readMaintenanceSettings({ [name]: bad })).toThrow(name);
+      }
+    }
   });
 });

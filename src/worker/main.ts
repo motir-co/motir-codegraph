@@ -9,6 +9,7 @@ import { access, stat } from 'node:fs/promises';
 import {
   readFetchSettings,
   readLayerSettings,
+  readMaintenanceSettings,
   readWorkerSettings,
   requireEnv,
   type FetchSettings,
@@ -67,12 +68,14 @@ try {
   const settings = readWorkerSettings();
   const layerSettings = readLayerSettings();
   const fetchSettings = readFetchSettings();
+  const maintenance = readMaintenanceSettings();
   await checkScratchDir(settings.scratchDir);
   const pool = createAppPool(appUrl);
   const loop = runWorkerLoop({
     pool,
     settings,
     layerSettings,
+    maintenance,
     fetch: (target) => toFetchOutcome(target, fetchSettings),
     log,
   });
