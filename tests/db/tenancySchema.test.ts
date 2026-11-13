@@ -399,3 +399,147 @@ describe('the catalogue', () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe('non-blank text', () => {
+  const CHECK_VIOLATION = '23514';
+
+  /** One insert per column a non-blank check guards (0001, replaced by 0009). */
+  const columns: Record<
+    string,
+    (c: pg.Client, ids: Awaited<ReturnType<typeof seed>>, value: string) => Promise<string | null>
+  > = {
+    'tenants.display_name': (c, _ids, value) =>
+      sqlState(c, 'INSERT INTO codegraph.tenants (display_name) VALUES ($1)', [value]),
+    'repositories.display_name': (c, ids, value) =>
+      sqlState(c, 'INSERT INTO codegraph.repositories (tenant_id, display_name) VALUES ($1, $2)', [
+        ids.tenant,
+        value,
+      ]),
+    'clients.name': (c, _ids, value) =>
+      sqlState(c, "INSERT INTO codegraph.clients (name, kind) VALUES ($1, 'client')", [value]),
+    'content_access_log.content_ref': (c, ids, value) =>
+      sqlState(
+        c,
+        'INSERT INTO codegraph.content_access_log (tenant_id, repository_id, client_id, content_ref) VALUES ($1, $2, $3, $4)',
+        [ids.tenant, ids.repository, ids.client, value],
+      ),
+  };
+  const columnNames = Object.keys(columns);
+
+  /** Every column's insert of `value`, as `column → SQLSTATE or null`, on rolled-back rows. */
+  async function attemptAll(value: string): Promise<Record<string, string | null>> {
+    return withClient(db.ownerUrl, async (c) => {
+      await c.query('BEGIN');
+      try {
+        const ids = await seed(c);
+        const states: Record<string, string | null> = {};
+        for (const [name, insert] of Object.entries(columns)) {
+          states[name] = await insert(c, ids, value);
+        }
+        return states;
+      } finally {
+        await c.query('ROLLBACK');
+      }
+    });
+  }
+  const every = (state: string | null) =>
+    Object.fromEntries(columnNames.map((name) => [name, state]));
+
+  it.each<[string, string]>([
+    ['an empty', ''],
+    ['a space-only', '  '],
+    // Not only spaces: one-argument btrim strips spaces alone, so before 0009
+    // these passed every check (MOTIR-11186).
+    ['a tab-only', '\t'],
+    ['a newline-only', '\n'],
+    ['a carriage-return-only', '\r'],
+    ['a mixed-whitespace', ' \t\r\n'],
+    ['a no-break-space-only', ' '],
+  ])('refuses %s value in every column', async (_label, value) => {
+    expect(await attemptAll(value)).toEqual(every(CHECK_VIOLATION));
+  });
+
+  // The server decides blankness with the JSON-schema pattern \S, whose \s is
+  // the set String.prototype.trim() strips, so the database refuses exactly
+  // that set. It is derived here from trim() itself, so a character the
+  // checks miss fails this case; the admits cases below pin the near misses.
+  it('refuses every character String.prototype.trim() strips, alone and repeated', async () => {
+    const blank = Array.from({ length: 0x3001 }, (_, c) => c)
+      .concat(0xfeff)
+      .filter((c) => (c < 0xd800 || c > 0xdfff) && String.fromCodePoint(c).trim() === '');
+    expect(blank.length).toBe(25);
+    for (const c of blank) {
+      const ch = String.fromCodePoint(c);
+      const hex = `U+${c.toString(16).toUpperCase().padStart(4, '0')}`;
+      expect(await attemptAll(ch), hex).toEqual(every(CHECK_VIOLATION));
+      expect(await attemptAll(ch.repeat(3)), hex).toEqual(every(CHECK_VIOLATION));
+    }
+  });
+
+  it.each<[string, string]>([
+    // The letters a misspelt E'\v' / E'\t' / E'\n' set would strip.
+    ['a letter v', 'v'],
+    ['a letter t', 't'],
+    ['a letter n', 'n'],
+    ['a value padded with tabs and newlines', '\tTenant\n'],
+    ['a value with a space inside', 'repo a'],
+    // trim() keeps these, so the checks do too.
+    ['a zero-width space', '​'],
+    ['a next-line control', '\u0085'],
+    ['a Mongolian vowel separator', '᠎'],
+  ])('admits %s in every column', async (_label, value) => {
+    expect(await attemptAll(value)).toEqual(every(null));
+  });
+
+  it('refuses an update that blanks a value, not only an insert', async () => {
+    await withClient(db.ownerUrl, async (c) => {
+      await c.query('BEGIN');
+      const ids = await seed(c);
+      expect(
+        await sqlState(c, 'UPDATE codegraph.tenants SET display_name = $1 WHERE id = $2', [
+          '\t\n',
+          ids.tenant,
+        ]),
+      ).toBe(CHECK_VIOLATION);
+      expect(
+        await sqlState(c, 'UPDATE codegraph.repositories SET display_name = $1 WHERE id = $2', [
+          '　',
+          ids.repository,
+        ]),
+      ).toBe(CHECK_VIOLATION);
+      await c.query('ROLLBACK');
+    });
+  });
+
+  it('leaves no check in the schema testing blankness with btrim', async () => {
+    const defs = await withClient(
+      db.ownerUrl,
+      async (c) =>
+        await queryRows<{ conname: string; def: string }>(
+          c,
+          `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+           WHERE connamespace = 'codegraph'::regnamespace AND contype = 'c'`,
+        ),
+    );
+    expect(defs.length).toBeGreaterThan(0);
+    expect(defs.filter((d) => /btrim/i.test(d.def))).toEqual([]);
+    expect(
+      defs
+        .filter((d) =>
+          [
+            'tenants_display_name_check',
+            'repositories_display_name_check',
+            'clients_name_check',
+            'content_access_log_content_ref_check',
+          ].includes(d.conname),
+        )
+        .map((d) => d.conname)
+        .sort(),
+    ).toEqual([
+      'clients_name_check',
+      'content_access_log_content_ref_check',
+      'repositories_display_name_check',
+      'tenants_display_name_check',
+    ]);
+  });
+});
