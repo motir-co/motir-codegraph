@@ -1,8 +1,9 @@
 // `pnpm worker` / `pnpm start:worker`: the indexer worker, as codegraph_app.
 // The one file that binds the real fetcher, pool and logger: everything it
-// starts takes them as dependencies. It exits non-zero only when it cannot
-// start; SIGTERM or SIGINT stops claiming, lets the in-flight job end, closes
-// the pool and exits 0.
+// starts takes them as dependencies. Beside the loop it publishes the queue's
+// metrics to stdout every METRICS_INTERVAL_MS. It exits non-zero only when it
+// cannot start; SIGTERM or SIGINT stops claiming, lets the in-flight job end,
+// stops the metrics publisher, closes the pool and exits 0.
 import { constants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 
@@ -10,6 +11,7 @@ import {
   readFetchSettings,
   readLayerSettings,
   readMaintenanceSettings,
+  readMetricsSettings,
   readWorkerSettings,
   requireEnv,
   type FetchSettings,
@@ -17,6 +19,7 @@ import {
 import { fetchTree, FetchRefusedError } from '../fetch/fetchTree.js';
 import { createAppPool } from '../server/pool.js';
 import { runWorkerLoop } from './loop.js';
+import { startQueueMetricsPublisher } from './metrics.js';
 import type { FetchOutcome, WorkerLogger } from './runJob.js';
 
 /** One JSON object per line on stdout: level, time, message, then the fields. */
@@ -69,6 +72,7 @@ try {
   const layerSettings = readLayerSettings();
   const fetchSettings = readFetchSettings();
   const maintenance = readMaintenanceSettings();
+  const metricsSettings = readMetricsSettings();
   await checkScratchDir(settings.scratchDir);
   const pool = createAppPool(appUrl);
   const loop = runWorkerLoop({
@@ -79,12 +83,17 @@ try {
     fetch: (target) => toFetchOutcome(target, fetchSettings),
     log,
   });
+  const metrics = startQueueMetricsPublisher(pool, metricsSettings, {
+    write: (line) => process.stdout.write(line),
+    log,
+  });
   log.info({ pollMs: settings.pollMs }, 'worker started');
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.once(signal, () => {
       log.info({ signal }, 'stopping: no more claims, finishing the job in flight');
       loop
         .stop()
+        .then(() => metrics.stop())
         .then(() => pool.end())
         .then(
           () => {

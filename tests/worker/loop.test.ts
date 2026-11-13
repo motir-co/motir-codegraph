@@ -375,6 +375,9 @@ describe('pnpm worker', () => {
       const malformed = await runScript('worker', env({ JOB_LEASE_MS: 'soon' }));
       expect(malformed.code).toBe(1);
       expect(malformed.stderr).toContain('JOB_LEASE_MS');
+      const metrics = await runScript('worker', env({ METRICS_INTERVAL_MS: '0' }));
+      expect(metrics.code).toBe(1);
+      expect(metrics.stderr).toContain('METRICS_INTERVAL_MS');
     },
     PROCESS_TIMEOUT_MS,
   );
@@ -420,6 +423,14 @@ describe('pnpm worker', () => {
       expect(lines.map((line) => (JSON.parse(line) as { msg: string }).msg)).toEqual(
         expect.arrayContaining(['worker started', 'job succeeded', 'job failed', 'worker stopped']),
       );
+      // The queue's metrics, published beside the loop as embedded-metric-format lines.
+      const documents = lines
+        .map(
+          (line) => JSON.parse(line) as { _aws?: { CloudWatchMetrics: { Namespace: string }[] } },
+        )
+        .filter((doc) => doc._aws !== undefined);
+      expect(documents.length).toBeGreaterThanOrEqual(1);
+      expect(documents[0]?._aws?.CloudWatchMetrics[0]?.Namespace).toBe('Codegraph/IndexQueue');
       expect(output).not.toContain(url);
       expect(output).not.toContain('/archive/');
       expect(await readdir(scratch)).toEqual([]);

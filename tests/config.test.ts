@@ -13,6 +13,7 @@ import {
   perFileCapBytes,
   readLayerSettings,
   readMaintenanceSettings,
+  readMetricsSettings,
   requireEnv,
 } from '../src/config.js';
 
@@ -265,5 +266,30 @@ describe('readMaintenanceSettings', () => {
         expect(() => readMaintenanceSettings({ [name]: bad })).toThrow(name);
       }
     }
+  });
+});
+
+describe('readMetricsSettings', () => {
+  it('defaults both settings when unset or blank, and reads whole numbers', () => {
+    expect(readMetricsSettings({})).toEqual({ metricsInterval: 30_000, failedJobsWindow: 300_000 });
+    expect(readMetricsSettings({ METRICS_INTERVAL_MS: '', FAILED_JOBS_WINDOW_MS: '  ' })).toEqual({
+      metricsInterval: 30_000,
+      failedJobsWindow: 300_000,
+    });
+    expect(
+      readMetricsSettings({ METRICS_INTERVAL_MS: '1000', FAILED_JOBS_WINDOW_MS: '60000' }),
+    ).toEqual({ metricsInterval: 1_000, failedJobsWindow: 60_000 });
+  });
+
+  it.each([
+    ['METRICS_INTERVAL_MS', '0'],
+    ['METRICS_INTERVAL_MS', '-5'],
+    ['METRICS_INTERVAL_MS', '2.5'],
+    ['FAILED_JOBS_WINDOW_MS', 'soon'],
+    ['FAILED_JOBS_WINDOW_MS', '1e3'],
+  ])('refuses %s=%s, naming the variable and the value', (name, value) => {
+    expect(() => readMetricsSettings({ [name]: value })).toThrow(
+      `${name} must be a whole number of 1 or more, not ${value}.`,
+    );
   });
 });

@@ -264,3 +264,36 @@ export function readMaintenanceSettings(env: NodeJS.ProcessEnv = process.env): M
     ),
   };
 }
+
+/** How often the worker publishes the queue's numbers, when `METRICS_INTERVAL_MS` is unset. */
+export const DEFAULT_METRICS_INTERVAL_MS = 30_000;
+
+/** The trailing window failures are counted over, when `FAILED_JOBS_WINDOW_MS` is unset. */
+export const DEFAULT_FAILED_JOBS_WINDOW_MS = 300_000;
+
+/**
+ * The queue-metrics publisher's settings: service configuration, the same for
+ * every tenant, read once by the worker process.
+ */
+export interface MetricsSettings {
+  /** Milliseconds between two published samples of the queue. */
+  readonly metricsInterval: number;
+  /** Milliseconds back from a sample that `FailedJobsRecent` counts over. */
+  readonly failedJobsWindow: number;
+}
+
+/**
+ * `METRICS_INTERVAL_MS` and `FAILED_JOBS_WINDOW_MS`, each defaulted when unset
+ * or blank (30,000 ms and 300,000 ms) and refused naming its variable and the
+ * value when it is not a whole number of 1 or more. Reads nothing else.
+ */
+export function readMetricsSettings(env: NodeJS.ProcessEnv = process.env): MetricsSettings {
+  return {
+    metricsInterval: readPositiveWhole(env, 'METRICS_INTERVAL_MS', DEFAULT_METRICS_INTERVAL_MS),
+    failedJobsWindow: readPositiveWhole(
+      env,
+      'FAILED_JOBS_WINDOW_MS',
+      DEFAULT_FAILED_JOBS_WINDOW_MS,
+    ),
+  };
+}
