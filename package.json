@@ -30,6 +30,7 @@
     "@fastify/rate-limit": "^11.2.2",
     "@tree-sitter-grammars/tree-sitter-kotlin": "1.1.0",
     "@tree-sitter-grammars/tree-sitter-lua": "0.4.1",
+    "ajv": "^8.20.0",
     "fastify": "^5.12.8",
     "pg": "^8.23.1",
     "tar-stream": "^3.2.2",

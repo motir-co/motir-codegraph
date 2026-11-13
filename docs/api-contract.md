@@ -331,7 +331,57 @@ per address per minute, however many requests arrive at once.
   with 25 more grants), `tests/server/copies.test.ts`,
   `tests/server/transaction.test.ts` (no module-level cache).
 
-## 12. Adding a route
+## 12. Indexing requests
+
+Three calls ask the service to index a repository at a commit. Each writes ONE
+`queued` job and answers `202` with its id, and nothing else:
+
+```json
+{ "jobId": "<uuid>" }
+```
+
+| call                                                                | body                                                                     |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `POST /v1/tenants/:tenantId/repositories/:repositoryId/first-index` | `{ commit, ref, isDefaultBranch, fetchUrl }`                             |
+| `POST /v1/tenants/:tenantId/repositories/:repositoryId/push`        | `{ commit, ref, isDefaultBranch, previousHead, changedPaths, fetchUrl }` |
+| `POST /v1/tenants/:tenantId/repositories/:repositoryId/refresh`     | `{ commit, ref, isDefaultBranch, fetchUrl }`                             |
+
+- **No indexing work happens in the request.** The call writes the job row in
+  the request's transaction, which commits before the `202` leaves (§3), and
+  returns: no fetch, no hash, no layer, no blob. A worker runs the job later.
+  A caller answered `202` holds a job the database kept; a caller answered a
+  refusal holds none.
+- **Every field is required**, `isDefaultBranch` on all three: the service
+  holds nothing about refs, and publishing writes the ref head with this flag.
+- **`commit` and `previousHead` are 40 lowercase hex**, the SHA-1 object
+  format the service indexes. A 64-character (SHA-256) id is refused.
+- **A `ref` is stored exactly as sent**: no `refs/heads/` prefix is required
+  and nothing is normalised, so a client uses one spelling of a branch. It is
+  non-blank and at most 1024 characters.
+- **A push supersedes the still-queued pushes of its ref.** In the same
+  transaction, before its own row is written, every `queued` push of the same
+  repository and the same ref becomes `superseded` and loses its fetch URL. A
+  push of another ref, or of another repository, is left queued.
+- **A push's `previousHead`** is the job's one candidate ancestor, and its
+  `changedPaths` (at most 10,000 non-empty paths of at most 4096 characters,
+  possibly none) are carried onto the row as sent and never trusted: the
+  worker hashes the whole tree. A first-index and a refresh carry neither; a
+  refresh is accepted whether or not the commit is new.
+- **`fetchUrl` is checked for shape only**: an absolute `http` or `https` URL
+  of at most 8192 characters, or `400 invalid_request` with a fixed sentence
+  that never repeats the value. The address is not resolved or screened here;
+  a refused address fails the JOB, with its reason (the fetcher's rule).
+- **Refusals** are the one path's codes (§5): `unauthenticated` 401,
+  `permission_denied` 403, `repository_not_found` 404 and `invalid_request`
+  400 (an unknown or missing field, a value outside its schema, a fetch URL
+  that fails its shape check). The repository resolves first, so a call on a
+  repository the caller cannot see is 404 whatever its body's fetch URL is.
+
+- Source: `src/server/routes/indexing.ts`, `src/db/indexJobs.ts`
+  (`enqueueJob`, `supersedeQueuedPushes`).
+- Test: `tests/server/indexing.test.ts`.
+
+## 13. Adding a route
 
 - [ ] Register it in a route module listed in `V1_ROUTE_MODULES`
       (`src/server/v1.ts`), never on the app itself.

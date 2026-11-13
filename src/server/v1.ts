@@ -13,6 +13,7 @@ import { bind, commitOrRollback, releaseRequestDb } from './binding.js';
 import { ApiError, handleNotFound } from './errors.js';
 import { operatorRoutes } from './operator.js';
 import { deleteRoutes } from './routes/deletes.js';
+import { indexingRoutes } from './routes/indexing.js';
 import { statusRoutes } from './routes/status.js';
 
 export const V1_PREFIX = '/v1';
@@ -53,7 +54,12 @@ export function rateLimitKey(request: FastifyRequest): string {
 }
 
 /** The route modules every copy of the server serves. */
-export const V1_ROUTE_MODULES: readonly V1Routes[] = [operatorRoutes, deleteRoutes, statusRoutes];
+export const V1_ROUTE_MODULES: readonly V1Routes[] = [
+  operatorRoutes,
+  deleteRoutes,
+  statusRoutes,
+  indexingRoutes,
+];
 
 /**
  * The `/v1` plugin, registered with `prefix: '/v1'`. Every versioned route is
