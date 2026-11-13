@@ -30,6 +30,7 @@ import {
   UnstoredBlobsError,
   type PublishedLayer,
 } from '../layers/publish.js';
+import { fanOutJob, type MissingBlob } from './fanOut.js';
 import { PRE_LAYER_CHECKS, runPreLayerChecks, type PreLayerCheck } from './preLayerCheck.js';
 
 /** Published commits offered as ancestors after a job's own, at most. */
@@ -100,7 +101,18 @@ export type RunResult =
   /** Another claim holds the row now: nothing more was written. */
   | { readonly outcome: 'lease_lost' }
   /** The job's client holds no live grant: the row can be neither read nor written. */
-  | { readonly outcome: 'grant_lost' };
+  | { readonly outcome: 'grant_lost' }
+  /** The job's missing blobs were written as `batches` batch rows; the job runs on in them. */
+  | { readonly outcome: 'fanned_out'; readonly batches: number }
+  /**
+   * A claimed batch stored its slice. `finalised` is the job's outcome when
+   * this claimant was its finaliser, and null when other batches remained.
+   */
+  | {
+      readonly outcome: 'batch_stored';
+      readonly storedBlobs: number;
+      readonly finalised: RunResult | null;
+    };
 
 /** A step's refusal: ends the job `failed` with this code. */
 export class JobFailure extends Error {
@@ -154,11 +166,11 @@ export async function discardScratch(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true });
 }
 
-function scopeOf(claim: Claim) {
+export function scopeOf(claim: Pick<Claim, 'tenantId' | 'repositoryId'>) {
   return { tenantId: claim.tenantId, repositoryId: claim.repositoryId };
 }
 
-function idsOf(claim: Claim, job?: JobRow | null): Record<string, unknown> {
+export function idsOf(claim: Claim, job?: JobRow | null): Record<string, unknown> {
   return {
     jobId: claim.jobId,
     tenantId: claim.tenantId,
@@ -170,7 +182,7 @@ function idsOf(claim: Claim, job?: JobRow | null): Record<string, unknown> {
 }
 
 /** A lease checkpoint: renews the job's lease, or raises `LeaseLostError`. */
-async function checkpoint(deps: RunJobDeps, claim: Claim): Promise<void> {
+export async function checkpoint(deps: RunJobDeps, claim: Claim): Promise<void> {
   const held = await inClaimTransaction(deps.pool, claim, (db) =>
     renewLease(db, scopeOf(claim), claim.jobId, claim.claimedBy, deps.settings.jobLeaseMs),
   );
@@ -182,7 +194,7 @@ async function checkpoint(deps: RunJobDeps, claim: Claim): Promise<void> {
  * `GrantLostError` when the binding reads unbound, and `LeaseLostError` when
  * the row is not running under this claim's token.
  */
-async function readClaimedJob(deps: RunJobDeps, claim: Claim): Promise<JobRow> {
+export async function readClaimedJob(deps: RunJobDeps, claim: Claim): Promise<JobRow> {
   const job = await inClaimTransaction(deps.pool, claim, (db) =>
     readJob(db, scopeOf(claim), claim.jobId),
   );
@@ -193,7 +205,7 @@ async function readClaimedJob(deps: RunJobDeps, claim: Claim): Promise<JobRow> {
 }
 
 /** A request job's three required fields, present by the table's own check. */
-function requestJob(job: JobRow): ClaimedJob {
+export function requestJob(job: JobRow): ClaimedJob {
   /* v8 ignore next 3 -- the table's checks keep all three on a running request job */
   if (job.commitSha === null || job.refName === null || job.fetchUrl === null) {
     throw new JobFailure('internal_error', `Job ${job.id} carries no commit, ref or fetch URL.`);
@@ -263,11 +275,11 @@ export async function candidateAncestors(
 }
 
 /** The blobs the opened layer names that the tenant lacks, one path per hash, in layer order. */
-async function missingBlobs(
+export async function missingBlobs(
   deps: RunJobDeps,
   claim: Claim,
   opened: OpenedLayer,
-): Promise<{ path: string; hash: string }[]> {
+): Promise<MissingBlob[]> {
   const pathOf = new Map<string, string>();
   for (const entry of opened.entries) {
     if (entry.gitBlobHash !== null && !pathOf.has(entry.gitBlobHash)) {
@@ -289,16 +301,18 @@ async function missingBlobs(
 
 /**
  * Stores, through `storeBlob`, every blob the opened layer names that the
- * tenant does not hold, in passes of `BLOB_STORE_BATCH_SIZE`, renewing the
- * lease between passes. Answers how many blobs it created.
+ * tenant does not hold (`missing`, when the caller has already read it), in
+ * passes of `BLOB_STORE_BATCH_SIZE`, renewing the lease between passes.
+ * Answers how many blobs it created.
  */
 export async function storeMissingBlobs(
   deps: RunJobDeps,
   claim: Claim,
   opened: OpenedLayer,
   tree: FetchedSource,
+  missing?: readonly MissingBlob[],
 ): Promise<number> {
-  const missing = await missingBlobs(deps, claim, opened);
+  missing ??= await missingBlobs(deps, claim, opened);
   const pass = deps.settings.blobStoreBatchSize;
   let created = 0;
   for (let i = 0; i < missing.length; i += pass) {
@@ -360,13 +374,16 @@ export async function publishJobLayer(
   }
 }
 
+/** What a job's runner did: stored and published, or fanned the store out into batches. */
+export type RunnerOutcome = { readonly storedBlobs: number } | { readonly fannedOut: number };
+
 /** The three request kinds share one run: they differ only in the candidates they carry. */
 async function runRequestJob(
   deps: RunJobDeps,
   claim: Claim,
   row: JobRow,
   dir: string,
-): Promise<number> {
+): Promise<RunnerOutcome> {
   const job = requestJob(row);
   const tree = await fetchJobTree(deps, job, dir);
   await checkpoint(deps, claim);
@@ -384,9 +401,13 @@ async function runRequestJob(
     paths: tree.paths,
     settings: deps.layerSettings,
   });
-  const stored = await storeMissingBlobs(deps, claim, opened, tree);
+  const missing = await missingBlobs(deps, claim, opened);
+  // Too many for one pass: the batches store them, and their last one publishes.
+  const verdict = await fanOutJob(deps, claim, opened, missing);
+  if (verdict.fannedOut) return { fannedOut: verdict.batches };
+  const stored = await storeMissingBlobs(deps, claim, opened, tree, missing);
   const { storedOnRetry } = await publishJobLayer(deps, claim, job, opened, tree);
-  return stored + storedOnRetry;
+  return { storedBlobs: stored + storedOnRetry };
 }
 
 /** A job's run, by kind. A kind with no entry ends the job `internal_error`, naming it. */
@@ -395,7 +416,7 @@ export type JobRunner = (
   claim: Claim,
   job: JobRow,
   dir: string,
-) => Promise<number>;
+) => Promise<RunnerOutcome>;
 
 export const JOB_RUNNERS: Readonly<Record<string, JobRunner | undefined>> = {
   first_index: runRequestJob,
@@ -417,7 +438,7 @@ export function failureOf(error: unknown): { reasonCode: string; message: string
 }
 
 /** Ends the job in one bound transaction; false when the claim no longer holds it. */
-async function endClaimedJob(deps: RunJobDeps, claim: Claim, end: JobEnd): Promise<boolean> {
+export async function endClaimedJob(deps: RunJobDeps, claim: Claim, end: JobEnd): Promise<boolean> {
   try {
     await inClaimTransaction(deps.pool, claim, (db) =>
       endJob(db, scopeOf(claim), claim.jobId, claim.claimedBy, end),
@@ -446,7 +467,12 @@ export async function runJob(deps: RunJobDeps, claim: Claim): Promise<RunResult>
       if (runner === undefined) {
         throw new JobFailure('internal_error', `No runner is registered for job kind ${job.kind}.`);
       }
-      const storedBlobs = await runner(deps, claim, job, dir);
+      const ran = await runner(deps, claim, job, dir);
+      if ('fannedOut' in ran) {
+        deps.log.info({ ...idsOf(claim, job), batches: ran.fannedOut }, 'job fanned out');
+        return { outcome: 'fanned_out', batches: ran.fannedOut };
+      }
+      const { storedBlobs } = ran;
       if (!(await endClaimedJob(deps, claim, { state: 'succeeded' }))) {
         throw new LeaseLostError(claim.jobId);
       }
@@ -460,7 +486,12 @@ export async function runJob(deps: RunJobDeps, claim: Claim): Promise<RunResult>
   }
 }
 
-async function settle(
+/**
+ * Records a run's outcome from what it threw: a lost grant or lease writes
+ * nothing; anything else ends the job `failed` with its reason code and a
+ * message with the fetch URL redacted, when the claim still holds it.
+ */
+export async function settle(
   deps: RunJobDeps,
   claim: Claim,
   job: JobRow | null,

@@ -218,31 +218,48 @@ describe('the loop', () => {
     ]);
   });
 
-  it('treats a claimed batch as idle when no batch runner is supplied, writing nothing', async () => {
+  it('hands a claimed batch to the batch runner, and by default to runBatch', async () => {
     const jobId = await enqueue();
     const claim = (await claimNext(pool, settings())) as Claim;
+    const hash = gitBlobHash(Buffer.from(FILE));
     await inClaimTransaction(pool, claim, (c) =>
-      insertJobBatches(c, t, jobId, [{ ordinal: 1, paths: ['x.ts'], gitBlobHashes: [sha()] }]),
+      insertJobBatches(c, t, jobId, [{ ordinal: 1, paths: ['x.ts'], gitBlobHashes: [hash] }]),
     );
-    log.clear();
-    const ticks: TickContext[] = [];
-    const loop = runWorkerLoop(loopDeps({ onTick: (c) => void ticks.push(c) }));
-    await until(() => ticks.length >= 2);
-    await loop.stop();
-    expect(new Set(log.texts())).toEqual(new Set([CLAIM_SQL]));
-    expect(ticks.every((tick) => tick.ran === null)).toBe(true);
 
-    // With a runner, the batch claim is handed to it.
+    // An injected runner is handed the batch claim.
+    const batches: Claim[] = [];
+    const injected = runWorkerLoop(
+      loopDeps({
+        runBatch: (_deps, batch) => {
+          batches.push(batch);
+          return Promise.resolve({ outcome: 'lease_lost' });
+        },
+      }),
+    );
+    await until(() => batches.length >= 1);
+    await injected.stop();
+    expect(batches[0]).toMatchObject({ kind: 'batch', jobId });
+
+    // Without one, runBatch stores the slice. The job still holds its own
+    // lease here, so the last batch finalises nothing.
     await owner.query(
       "UPDATE codegraph.index_job_batches SET state = 'queued', lease_expires_at = NULL, claimed_by = NULL",
     );
-    const batches: Claim[] = [];
-    const withRunner = runWorkerLoop(
-      loopDeps({ runBatch: (batch) => Promise.resolve(void batches.push(batch)) }),
+    const ticks: TickContext[] = [];
+    const loop = runWorkerLoop(loopDeps({ onTick: (c) => void ticks.push(c) }));
+    await until(() => ticks.some((tick) => tick.ran !== null));
+    await loop.stop();
+    expect(ticks.find((tick) => tick.ran !== null)?.ran).toEqual({
+      outcome: 'batch_stored',
+      storedBlobs: 1,
+      finalised: null,
+    });
+    const [batch] = await queryRows<{ state: string; stored_count: number }>(
+      owner,
+      'SELECT state, stored_count FROM codegraph.index_job_batches WHERE job_id = $1',
+      [jobId],
     );
-    await until(() => batches.length >= 1);
-    await withRunner.stop();
-    expect(batches[0]).toMatchObject({ kind: 'batch', jobId });
+    expect(batch).toEqual({ state: 'stored', stored_count: 1 });
   });
 
   it('runs one job of a repository at a time, across two loops', async () => {

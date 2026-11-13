@@ -7,6 +7,7 @@ import type pg from 'pg';
 
 import type { WorkerSettings } from '../config.js';
 import { claimNext, type Claim } from '../db/workerJobs.js';
+import { runBatch } from './fanOut.js';
 import { runJob, type RunJobDeps, type RunResult, type WorkerLogger } from './runJob.js';
 
 /** What the tick hook is handed, once per iteration whether or not a job ran. */
@@ -21,11 +22,8 @@ export interface TickContext {
 export interface WorkerLoopDeps extends RunJobDeps {
   /** Called once per iteration; a throw is logged and never ends the loop. */
   readonly onTick?: (context: TickContext) => void | Promise<void>;
-  /**
-   * Runs a claimed batch. Absent, a batch claim is an idle iteration: the
-   * worker writes nothing and the batch's lease returns it to the queue.
-   */
-  readonly runBatch?: (claim: Claim) => Promise<void>;
+  /** Runs a claimed batch; `runBatch` from `./fanOut.js` when omitted. */
+  readonly runBatch?: (deps: RunJobDeps, claim: Claim) => Promise<RunResult>;
 }
 
 export interface WorkerLoop {
@@ -62,10 +60,7 @@ export function runWorkerLoop(deps: WorkerLoopDeps): WorkerLoop {
   const iterate = async (): Promise<RunResult | null> => {
     const claim = await claimNext(deps.pool, deps.settings);
     if (claim === null) return null;
-    if (claim.kind === 'batch') {
-      if (deps.runBatch !== undefined) await deps.runBatch(claim);
-      return null;
-    }
+    if (claim.kind === 'batch') return await (deps.runBatch ?? runBatch)(deps, claim);
     return await runJob(deps, claim);
   };
 

@@ -510,3 +510,107 @@ export async function finishBatch(
   ]);
   return row;
 }
+
+/** What marking a batch stored answers. */
+export interface BatchStored {
+  readonly batch: BatchRow;
+  /** The job's batches still `queued` or `running` once this one is stored. */
+  readonly unstoredBatches: number;
+  /**
+   * The job lease's new token when this claimant is the job's finaliser: the
+   * one whose transaction saw no batch of the job left un-stored. Null for
+   * every other claimant.
+   */
+  readonly finaliserToken: string | null;
+}
+
+const BOUND_TENANT_SQL = 'SELECT codegraph.codegraph_bound_tenant() AS tenant';
+
+// The job's row is locked BEFORE the batch is written: a claimant then holds
+// no batch row while it waits, so it can never deadlock with a failing batch,
+// which writes its own row, then the job, then the job's other batches.
+const LOCK_JOB_OF_BATCH_SQL = `SELECT id FROM codegraph.index_jobs
+  WHERE tenant_id = $1 AND repository_id = $2
+    AND id = (SELECT job_id FROM codegraph.index_job_batches
+              WHERE tenant_id = $1 AND repository_id = $2 AND id = $3)
+  FOR UPDATE`;
+
+const COUNT_UNSTORED_BATCHES_SQL = `SELECT count(*)::integer AS n FROM codegraph.index_job_batches
+  WHERE tenant_id = $1 AND repository_id = $2 AND job_id = $3 AND state IN ('queued', 'running')`;
+
+// A fanned-out job runs with no lease; the finaliser takes one, so a finaliser
+// that dies is recovered by the lease's expiry like any other run.
+const TAKE_JOB_LEASE_SQL = `UPDATE codegraph.index_jobs
+  SET lease_expires_at = now() + make_interval(secs => $4::double precision / 1000),
+      claimed_by = gen_random_uuid()::text
+  WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+    AND state = 'running' AND claimed_by IS NULL
+  RETURNING claimed_by AS "claimedBy"`;
+
+/**
+ * Marks a running batch this claim holds `stored` with `storedCount`, and
+ * decides in the SAME transaction whether its claimant is the job's
+ * finaliser. Its statements, in order: the bound tenant is asserted to be the
+ * batch's; the job's row is locked (`FOR UPDATE`); the batch is written; the
+ * job's batches still `queued` or `running` are counted; and when none is,
+ * the job's lease is taken with a fresh token for `leaseMs`.
+ *
+ * The lock is what makes the finaliser unique. Under READ COMMITTED each
+ * statement reads what was committed when it began, so the count, taken after
+ * the lock, sees every batch an earlier holder of the lock stored: of two
+ * claimants storing a job's last two batches at once, the first to take the
+ * lock counts the other's batch un-stored, and the second, which waits for the
+ * first to commit, counts none. Never two finalisers, and never none.
+ *
+ * Refuses with `JobNotWritableError` before its first write when the
+ * transaction is bound to no tenant or another one, and with `ClaimLostError`
+ * when the batch is not running under `claimedBy`.
+ */
+export async function markBatchStoredAndLockJob(
+  db: pg.ClientBase,
+  scope: JobScope,
+  batchId: string,
+  claimedBy: string,
+  storedCount: number,
+  leaseMs: number,
+): Promise<BatchStored> {
+  const { rows: bound } = await db.query<{ tenant: string | null }>(BOUND_TENANT_SQL);
+  if (bound[0]?.tenant !== scope.tenantId) {
+    throw new JobNotWritableError(
+      `No batch may be written for tenant ${scope.tenantId} in a transaction not bound to it.`,
+    );
+  }
+  const lease = positiveMs(leaseMs);
+  const { rows: jobs } = await db.query<{ id: string }>(LOCK_JOB_OF_BATCH_SQL, [
+    scope.tenantId,
+    scope.repositoryId,
+    batchId,
+  ]);
+  const { rows } = await db.query<BatchRow>(STORE_BATCH_SQL, [
+    scope.tenantId,
+    scope.repositoryId,
+    batchId,
+    claimedBy,
+    storedCount,
+  ]);
+  const batch = rows[0];
+  const job = jobs[0];
+  // A running batch belongs to a running job: ending a job ends its batches.
+  if (batch === undefined || job === undefined) {
+    throw new ClaimLostError('batch', batchId);
+  }
+  const { rows: counted } = await db.query<{ n: number }>(COUNT_UNSTORED_BATCHES_SQL, [
+    scope.tenantId,
+    scope.repositoryId,
+    job.id,
+  ]);
+  const unstoredBatches = counted[0]?.n ?? 0;
+  if (unstoredBatches > 0) return { batch, unstoredBatches, finaliserToken: null };
+  const { rows: taken } = await db.query<{ claimedBy: string }>(TAKE_JOB_LEASE_SQL, [
+    scope.tenantId,
+    scope.repositoryId,
+    job.id,
+    lease,
+  ]);
+  return { batch, unstoredBatches, finaliserToken: taken[0]?.claimedBy ?? null };
+}

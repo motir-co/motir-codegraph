@@ -1,7 +1,7 @@
 /**
  * The indexer worker's own access to the queue, beside `src/db/indexJobs.ts`
- * (which reads and ends the job row): the claim, the job-lease renewal, and
- * the binding a claimed job's every write runs under.
+ * (which reads and ends the job row): the claim, the job-lease renewal and
+ * release, and the binding a claimed job's every write runs under.
  *
  * The claim is the queue's ONE cross-tenant statement: the definer function
  * `codegraph.codegraph_claim_index_job` answers identity only (the tenant,
@@ -133,4 +133,32 @@ export async function inClaimTransaction<T>(
   } finally {
     client.release();
   }
+}
+
+const RELEASE_JOB_LEASE_SQL = `UPDATE codegraph.index_jobs
+  SET lease_expires_at = NULL, claimed_by = NULL
+  WHERE tenant_id = $1 AND repository_id = $2 AND id = $3
+    AND state = 'running' AND claimed_by = $4
+  RETURNING id`;
+
+/**
+ * Clears the job's lease and token, if it is still this claim's running job,
+ * and answers whether it was. The job stays `running` with its fetch URL: a
+ * running job with no lease is owned by its batches, so the claim's
+ * expired-lease sweep never re-queues it and no other job of its repository
+ * is claimed. Called in the transaction that writes the job's batches.
+ */
+export async function releaseLease(
+  db: pg.ClientBase,
+  scope: JobScope,
+  jobId: string,
+  claimedBy: string,
+): Promise<boolean> {
+  const { rows } = await db.query(RELEASE_JOB_LEASE_SQL, [
+    scope.tenantId,
+    scope.repositoryId,
+    jobId,
+    claimedBy,
+  ]);
+  return rows.length > 0;
 }

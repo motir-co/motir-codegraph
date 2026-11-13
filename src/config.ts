@@ -186,7 +186,7 @@ export const DEFAULT_JOB_LEASE_MS = 300_000;
 /** Claims a job may have before it ends `attempts_exhausted`, when `MAX_ATTEMPTS` is unset. */
 export const DEFAULT_MAX_ATTEMPTS = 3;
 
-/** Missing blobs stored between two lease renewals, when `BLOB_STORE_BATCH_SIZE` is unset. */
+/** One run's largest store, and one batch's slice, when `BLOB_STORE_BATCH_SIZE` is unset. */
 export const DEFAULT_BLOB_STORE_BATCH_SIZE = 500;
 
 /**
@@ -202,7 +202,10 @@ export interface WorkerSettings {
   readonly maxAttempts: number;
   /** The directory the worker writes each job's source under; the only path it writes. */
   readonly scratchDir: string;
-  /** Missing blobs stored between two lease renewals. */
+  /**
+   * The most missing blobs a run stores itself, between two lease renewals. A
+   * job missing more is fanned out into batch rows of at most this many.
+   */
   readonly blobStoreBatchSize: number;
 }
 

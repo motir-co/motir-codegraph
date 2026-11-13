@@ -24,6 +24,7 @@ import {
   redactFetchUrl,
   runJob,
   scratchDirFor,
+  storeMissingBlobs,
   type FetchStep,
   type RunJobDeps,
   type WorkerLogger,
@@ -600,21 +601,40 @@ describe('the pre-layer checks', () => {
 });
 
 describe('storing in passes', () => {
-  it('renews the lease between the first and the last store of a job larger than one pass', async () => {
+  it('renews the lease between the first and the last pass of a store larger than one pass', async () => {
+    // A run fans such a job out; the publish retry still stores in passes.
     const big: Tree = Object.fromEntries(
       Array.from({ length: 5 }, (_, i) => [`f${String(i)}.txt`, `file ${String(i)}\n`]),
     );
-    const { claim } = await enqueueAndClaim();
+    const { claim, commit } = await enqueueAndClaim();
+    const dir = scratchDirFor(settings(), claim.jobId);
+    await mkdir(dir, { recursive: true });
+    const fetched = await serve(big)({ url: '', dir });
+    if (!fetched.ok) throw new Error('stub refused');
+    const opened = await openLayer(pool, {
+      clientId: t.clientId,
+      tenantId: t.tenantId,
+      repositoryId: t.repositoryId,
+      commitSha: commit,
+      refName: 'refs/heads/main',
+      isDefaultBranch: true,
+      candidateAncestors: [],
+      paths: fetched.tree.paths,
+      settings: { hardCeiling: DEFAULT_HARD_CEILING },
+    });
     const recordingPool = createAppPool(db.appUrl);
     const recorded = recordQueries(recordingPool);
     try {
-      const result = await runJob(
+      const created = await storeMissingBlobs(
         { ...deps(serve(big)), pool: recordingPool, settings: settings({ blobStoreBatchSize: 2 }) },
         claim,
+        opened,
+        fetched.tree,
       );
-      expect(result).toEqual({ outcome: 'succeeded', storedBlobs: 5 });
+      expect(created).toBe(5);
     } finally {
       await recordingPool.end();
+      await rm(dir, { recursive: true, force: true });
     }
     const texts = recorded.texts();
     const stores = texts.flatMap((text, i) =>
