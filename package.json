@@ -23,6 +23,7 @@
     "worker": "node --env-file-if-exists=.env --import tsx src/worker/main.ts",
     "fixture:sample-tree": "node --env-file-if-exists=.env --import tsx src/cli/sample-tree.ts",
     "layer:journey": "node --env-file-if-exists=.env --import tsx src/cli/layer-journey.ts",
+    "bench:indexing": "node --env-file-if-exists=.env --import tsx src/cli/indexing-bench.ts",
     "start": "node dist/server/main.js",
     "start:worker": "node dist/worker/main.js",
     "test": "vitest run",
