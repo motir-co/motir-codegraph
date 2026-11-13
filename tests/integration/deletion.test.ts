@@ -2,11 +2,20 @@ import { randomUUID } from 'node:crypto';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { enqueueJob, insertJobBatches } from '../../src/db/indexJobs.js';
 import { insertLayer, appendLayerPaths, markPublished, moveRefHead } from '../../src/db/layers.js';
 import { queryRows, withClient } from '../helpers/db.js';
 import { rowsReferencing, snapshot } from '../helpers/rows.js';
 import { inBoundTransaction } from '../helpers/tenancy.js';
 import { foundation, type Foundation } from './foundation.fixture.js';
+
+const QUEUE_AND_LAYER_TABLES = [
+  'commit_layers',
+  'layer_paths',
+  'ref_heads',
+  'index_jobs',
+  'index_job_batches',
+];
 
 let f: Foundation;
 beforeEach(async () => {
@@ -55,6 +64,18 @@ beforeEach(async () => {
               layerId: layer.id,
               isDefaultBranch: true,
             });
+            // And a queued job with one batch slice, written through the queue module.
+            const job = await enqueueJob(c, {
+              ...scope,
+              clientId: f.fx.readerId,
+              kind: 'first_index',
+              commitSha: 'a'.repeat(40),
+              refName: 'refs/heads/main',
+              fetchUrl: 'https://example.test/source.tar.gz',
+            });
+            await insertJobBatches(c, scope, job.id, [
+              { ordinal: 1, paths: ['README.md'], gitBlobHashes: ['b'.repeat(40)] },
+            ]);
           }
         },
         { commit: true },
@@ -79,7 +100,7 @@ describe('deleting a repository', () => {
       const remaining = await snapshot(c, f.fx.tenantA.id);
       expect(remaining.repositories.map((r) => r.id)).toEqual([api.id]);
       expect(remaining.log.map((r) => r.repository_id)).toEqual([api.id]);
-      for (const table of ['commit_layers', 'layer_paths', 'ref_heads']) {
+      for (const table of QUEUE_AND_LAYER_TABLES) {
         const rows = await queryRows<{ repository_id: string }>(
           c,
           `SELECT repository_id FROM codegraph.${table} WHERE tenant_id = $1`,
@@ -99,7 +120,7 @@ describe('deleting a tenant', () => {
       const clients = await queryRows(c, 'SELECT * FROM codegraph.clients ORDER BY id');
       const credentials = await queryRows(c, 'SELECT * FROM codegraph.credentials ORDER BY id');
       const seeded = await rowsReferencing(c, 'tenant_id', f.fx.tenantA.id);
-      for (const table of ['commit_layers', 'layer_paths', 'ref_heads']) {
+      for (const table of QUEUE_AND_LAYER_TABLES) {
         expect(seeded[table]).toBe(f.fx.tenantA.repositories.length);
       }
       await c.query('DELETE FROM codegraph.tenants WHERE id = $1', [f.fx.tenantA.id]);
@@ -111,6 +132,8 @@ describe('deleting a tenant', () => {
         'commit_layers',
         'content_access_log',
         'grants',
+        'index_job_batches',
+        'index_jobs',
         'layer_paths',
         'ref_heads',
         'repositories',
