@@ -70,12 +70,13 @@ applied 0005_blob_and_contents.sql
 applied 0006_blob_fact.sql
 applied 0007_commit_layers.sql
 applied 0008_blob_fact_text_whitespace.sql
+applied 0009_tenancy_and_ref_text_whitespace.sql
 ```
 
 The second applies nothing:
 
 ```text
-nothing to apply (8 already applied)
+nothing to apply (9 already applied)
 ```
 
 `pnpm test` then runs the suite against the same Postgres; every test creates and

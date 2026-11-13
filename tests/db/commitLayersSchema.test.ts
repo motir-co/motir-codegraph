@@ -795,6 +795,23 @@ describe('ref_heads invariants', () => {
       // Another repository has its own default branch.
       expect(await sqlState(c, INSERT_REF, ref(sibling, 'refs/heads/main', s, true))).toBeNull();
       expect(await sqlState(c, INSERT_REF, ref(repo, '  ', l, false))).toBe(CHECK_VIOLATION);
+      // Not only spaces: one-argument btrim strips spaces alone, so before 0009
+      // these passed the check (MOTIR-11186). The check refuses exactly the
+      // characters String.prototype.trim() strips.
+      for (const blank of ['', '\t', '\n', '\r\n', ' \t\v\f', ' ', ' ', '﻿']) {
+        expect(
+          await sqlState(c, INSERT_REF, ref(repo, blank, l, false)),
+          JSON.stringify(blank),
+        ).toBe(CHECK_VIOLATION);
+      }
+      // The letters a misspelt E'\v' / E'\t' / E'\n' set would strip, a name
+      // padded with whitespace, and a character trim() keeps are all names.
+      for (const name of ['v', 't', 'n', '\trefs/heads/x\n', '​']) {
+        expect(
+          await sqlState(c, INSERT_REF, ref(repo, name, l, false)),
+          JSON.stringify(name),
+        ).toBeNull();
+      }
       expect(await sqlState(c, INSERT_REF, ref(repo, 'x', l, false, 'abc'))).toBe(CHECK_VIOLATION);
       const defaulted = await queryRows<{ is_default_branch: boolean }>(
         c,
