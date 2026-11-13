@@ -14,6 +14,32 @@ export const DELTA_TARGET_MS = 2_000;
 export const RESOLVE_TARGET_MS = 150;
 export const COMPACT_TARGET_MS = 60_000;
 
+/**
+ * How the resolution target is judged on a shared runner (MOTIR-11228). The
+ * SAME code read 112–173 ms on GitHub's shared runners and 51–63 ms on a quiet
+ * 4-core machine, so a wall-clock bound with 25–35 % headroom failed on a slow
+ * runner rather than on slow resolution. The gate therefore asserts what the
+ * resolution statement itself controls: its cost over a same-run baseline that
+ * reads the same 20,000 rows of ONE layer, timed pass by pass beside it on the
+ * same connection, so a slow runner slows both sides.
+ *
+ * - RESOLVE_OVERHEAD_LIMIT: the median of the per-pass ratios may not exceed
+ *   it. Measured locally: 3.65× quiet; 2.28× and 1.93× with the cores 2× and 4×
+ *   oversubscribed (where the old bound read 156.6 ms and would have failed);
+ *   8.67× for a resolution doing its work twice, which this limit fails and the
+ *   old 150 ms bound passed at 109.8 ms.
+ * - RESOLVE_SUITE_BOUND_MS: a loose absolute backstop on the median, twice the
+ *   target, for a regression that slows the baseline read as much as the
+ *   resolution (a lost primary key, a bloated table). It sits 73 % above the
+ *   slowest reading CI has produced.
+ * - RESOLVE_TARGET_MS stays the story's number and is printed beside every
+ *   reading; on its own it no longer fails the suite.
+ */
+export const RESOLVE_OVERHEAD_LIMIT = 6;
+export const RESOLVE_SUITE_BOUND_MS = 2 * RESOLVE_TARGET_MS;
+/** The resolution gate's measured passes: odd, so the median is one reading. */
+export const RESOLVE_REPETITIONS = 7;
+
 /** The resolved map size every scenario measures at. */
 export const MAP_PATHS = 20_000;
 /** The changed paths of the timed delta. */
@@ -80,8 +106,28 @@ export interface Readings {
   readonly max: number;
 }
 
+/** Readings from the warm-up pass and the measured passes, in pass order. */
+export function readingsOf(warmUpMs: number, ms: readonly number[]): Readings {
+  const ordered = [...ms].sort((a, b) => a - b);
+  return {
+    warmUpMs,
+    ms,
+    median: median(ordered),
+    min: ordered[0] as number,
+    max: ordered[ordered.length - 1] as number,
+  };
+}
+
+/** The middle of `sorted` (ascending), the mean of the middle two when even. */
+function median(sorted: readonly number[]): number {
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? (sorted[mid] as number)
+    : ((sorted[mid - 1] as number) + (sorted[mid] as number)) / 2;
+}
+
 /**
- * The fixed protocol: one discarded warm-up pass, then REPETITIONS measured
+ * The fixed protocol: one discarded warm-up pass, then `repetitions` measured
  * passes. `setup(pass)` runs OUTSIDE the window (pass 0 is the warm-up);
  * `measured(pass, prepared)` is the only thing inside it; `verify` runs after
  * the window closes. Never adaptive: no retry, no extra pass.
@@ -90,9 +136,10 @@ export async function measure<P, R>(
   setup: (pass: number) => Promise<P>,
   measured: (pass: number, prepared: P) => Promise<R>,
   verify: (pass: number, result: R, prepared: P) => Promise<void>,
+  repetitions = REPETITIONS,
 ): Promise<Readings> {
   const all: number[] = [];
-  for (let pass = 0; pass <= REPETITIONS; pass += 1) {
+  for (let pass = 0; pass <= repetitions; pass += 1) {
     const prepared = await setup(pass);
     const opened = performance.now();
     const result = await measured(pass, prepared);
@@ -101,13 +148,63 @@ export async function measure<P, R>(
     all.push(ms);
   }
   const [warmUpMs, ...ms] = all as [number, ...number[]];
-  const ordered = [...ms].sort((a, b) => a - b);
+  return readingsOf(warmUpMs, ms);
+}
+
+/** A measured call and its same-run baseline, read pass by pass on one runner. */
+export interface PairedReadings {
+  readonly baseline: Readings;
+  readonly measured: Readings;
+  /** measured ÷ baseline, per measured pass, in pass order. */
+  readonly ratios: readonly number[];
+  readonly medianRatio: number;
+}
+
+/**
+ * The paired protocol: `measure`'s fixed protocol, with a BASELINE call timed
+ * in the same pass as the measured one, so both readings come from the same
+ * runner in the same moment. The order alternates (baseline first on even
+ * passes, measured first on odd ones) so drift inside a pass loads neither
+ * side. Each pass's ratio is measured ÷ baseline; the warm-up's is discarded
+ * with its readings. Never adaptive: no retry, no extra pass.
+ */
+export async function measurePaired<P, B, R>(
+  setup: (pass: number) => Promise<P>,
+  baseline: (pass: number, prepared: P) => Promise<B>,
+  measured: (pass: number, prepared: P) => Promise<R>,
+  verify: (pass: number, baselineResult: B, result: R, prepared: P) => Promise<void>,
+  repetitions = REPETITIONS,
+): Promise<PairedReadings> {
+  const timed = async <T>(fn: () => Promise<T>): Promise<[T, number]> => {
+    const opened = performance.now();
+    const result = await fn();
+    return [result, performance.now() - opened];
+  };
+  const baselineMs: number[] = [];
+  const measuredMs: number[] = [];
+  for (let pass = 0; pass <= repetitions; pass += 1) {
+    const prepared = await setup(pass);
+    let b: [B, number];
+    let r: [R, number];
+    if (pass % 2 === 0) {
+      b = await timed(() => baseline(pass, prepared));
+      r = await timed(() => measured(pass, prepared));
+    } else {
+      r = await timed(() => measured(pass, prepared));
+      b = await timed(() => baseline(pass, prepared));
+    }
+    await verify(pass, b[0], r[0], prepared);
+    baselineMs.push(b[1]);
+    measuredMs.push(r[1]);
+  }
+  const [baselineWarmUp, ...baselineRest] = baselineMs as [number, ...number[]];
+  const [measuredWarmUp, ...measuredRest] = measuredMs as [number, ...number[]];
+  const ratios = measuredRest.map((ms, i) => ms / (baselineRest[i] as number));
   return {
-    warmUpMs,
-    ms,
-    median: ordered[Math.floor(ordered.length / 2)] as number,
-    min: ordered[0] as number,
-    max: ordered[ordered.length - 1] as number,
+    baseline: readingsOf(baselineWarmUp, baselineRest),
+    measured: readingsOf(measuredWarmUp, measuredRest),
+    ratios,
+    medianRatio: median([...ratios].sort((a, b) => a - b)),
   };
 }
 
@@ -117,6 +214,43 @@ export function describeReadings(name: string, target: number, r: Readings): str
     `${name}: median ${f(r.median)} ms (target ${String(target)} ms); ` +
     `readings ${r.ms.map(f).join(', ')} ms; min ${f(r.min)} max ${f(r.max)}; warm-up ${f(r.warmUpMs)} ms`
   );
+}
+
+export function describePaired(name: string, p: PairedReadings): string {
+  const f = (n: number) => n.toFixed(2);
+  return (
+    `${describeReadings(name, RESOLVE_TARGET_MS, p.measured)}\n` +
+    `${name} baseline (same-run ${String(MAP_PATHS)}-row read): median ${p.baseline.median.toFixed(1)} ms; ` +
+    `readings ${p.baseline.ms.map((n) => n.toFixed(1)).join(', ')} ms; warm-up ${p.baseline.warmUpMs.toFixed(1)} ms\n` +
+    `${name} over its baseline: median ${f(p.medianRatio)}× (limit ${String(RESOLVE_OVERHEAD_LIMIT)}×); ` +
+    `ratios ${p.ratios.map(f).join(', ')}; absolute backstop ${String(RESOLVE_SUITE_BOUND_MS)} ms`
+  );
+}
+
+/**
+ * Why a paired resolution reading fails the gate, one entry per rule it
+ * breaks; empty when it passes. The ratio rule is the gate; the absolute
+ * backstop catches a regression that slows the baseline too.
+ */
+export function resolutionMisses(
+  p: PairedReadings,
+  limits: { readonly overhead: number; readonly boundMs: number } = {
+    overhead: RESOLVE_OVERHEAD_LIMIT,
+    boundMs: RESOLVE_SUITE_BOUND_MS,
+  },
+): string[] {
+  const misses: string[] = [];
+  if (p.medianRatio > limits.overhead) {
+    misses.push(
+      `median ${p.medianRatio.toFixed(2)}× its same-run baseline, over the ${String(limits.overhead)}× limit`,
+    );
+  }
+  if (p.measured.median > limits.boundMs) {
+    misses.push(
+      `median ${p.measured.median.toFixed(1)} ms, over the ${String(limits.boundMs)} ms absolute backstop`,
+    );
+  }
+  return misses;
 }
 
 /** One statement a recorded pool issued, with the arguments it was called with. */
