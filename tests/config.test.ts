@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_PER_FILE_CAP_BYTES, perFileCapBytes, requireEnv } from '../src/config.js';
+import {
+  DEFAULT_COMPACTION_THRESHOLD,
+  DEFAULT_HARD_CEILING,
+  DEFAULT_PER_FILE_CAP_BYTES,
+  DEFAULT_STAGED_LAYER_STALENESS_MS,
+  perFileCapBytes,
+  readLayerSettings,
+  requireEnv,
+} from '../src/config.js';
 
 describe('requireEnv', () => {
   it('returns the value of a set variable', () => {
@@ -44,6 +52,95 @@ describe('perFileCapBytes', () => {
     } finally {
       if (before === undefined) delete process.env.PER_FILE_CAP_BYTES;
       else process.env.PER_FILE_CAP_BYTES = before;
+    }
+  });
+});
+
+describe('readLayerSettings', () => {
+  it('defaults all three when the environment names none', () => {
+    expect(DEFAULT_COMPACTION_THRESHOLD).toBe(8);
+    expect(DEFAULT_HARD_CEILING).toBe(32);
+    expect(DEFAULT_STAGED_LAYER_STALENESS_MS).toBe(7_200_000);
+    expect(readLayerSettings({})).toEqual({
+      compactionThreshold: 8,
+      hardCeiling: 32,
+      stagedLayerStaleness: 7_200_000,
+    });
+  });
+
+  it('parses each variable set alone, leaving the other two at their defaults', () => {
+    expect(readLayerSettings({ COMPACTION_THRESHOLD: '4' })).toEqual({
+      compactionThreshold: 4,
+      hardCeiling: 32,
+      stagedLayerStaleness: 7_200_000,
+    });
+    expect(readLayerSettings({ HARD_CEILING: '64' })).toEqual({
+      compactionThreshold: 8,
+      hardCeiling: 64,
+      stagedLayerStaleness: 7_200_000,
+    });
+    expect(readLayerSettings({ STAGED_LAYER_STALENESS_MS: '600000' })).toEqual({
+      compactionThreshold: 8,
+      hardCeiling: 32,
+      stagedLayerStaleness: 600_000,
+    });
+  });
+
+  it('treats a blank value as unset', () => {
+    expect(
+      readLayerSettings({
+        COMPACTION_THRESHOLD: '',
+        HARD_CEILING: '   ',
+        STAGED_LAYER_STALENESS_MS: '\t',
+      }),
+    ).toEqual(readLayerSettings({}));
+  });
+
+  const names = ['COMPACTION_THRESHOLD', 'HARD_CEILING', 'STAGED_LAYER_STALENESS_MS'];
+  const bad = ['0', '-1', '8.5', 'abc', '1e3', '0x10', '99999999999999999999'];
+  it.each(names.flatMap((name) => bad.map((value) => [name, value] as const)))(
+    'refuses %s=%s naming the variable and the value',
+    (name, value) => {
+      expect(() => readLayerSettings({ [name]: value })).toThrow(
+        `${name} must be a whole number of 1 or more, not ${value}.`,
+      );
+    },
+  );
+
+  it('refuses a threshold at or above the effective ceiling minus one, naming both', () => {
+    for (const threshold of ['31', '32']) {
+      expect(() => readLayerSettings({ COMPACTION_THRESHOLD: threshold })).toThrow(
+        `COMPACTION_THRESHOLD (${threshold}) must be below HARD_CEILING (32) minus one`,
+      );
+    }
+    expect(readLayerSettings({ COMPACTION_THRESHOLD: '30' }).compactionThreshold).toBe(30);
+    expect(() => readLayerSettings({ COMPACTION_THRESHOLD: '10', HARD_CEILING: '10' })).toThrow(
+      'COMPACTION_THRESHOLD (10) must be below HARD_CEILING (10) minus one',
+    );
+  });
+
+  it('checks the pair over effective values when only one of them is set', () => {
+    expect(() => readLayerSettings({ COMPACTION_THRESHOLD: '40' })).toThrow(
+      'COMPACTION_THRESHOLD (40) must be below HARD_CEILING (32) minus one',
+    );
+    expect(() => readLayerSettings({ HARD_CEILING: '4' })).toThrow(
+      'COMPACTION_THRESHOLD (8) must be below HARD_CEILING (4) minus one',
+    );
+    expect(readLayerSettings({ HARD_CEILING: '10' })).toEqual({
+      compactionThreshold: 8,
+      hardCeiling: 10,
+      stagedLayerStaleness: 7_200_000,
+    });
+  });
+
+  it('reads the process environment by default, and nothing at import', () => {
+    const before = process.env.HARD_CEILING;
+    process.env.HARD_CEILING = '48';
+    try {
+      expect(readLayerSettings().hardCeiling).toBe(48);
+    } finally {
+      if (before === undefined) delete process.env.HARD_CEILING;
+      else process.env.HARD_CEILING = before;
     }
   });
 });

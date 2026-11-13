@@ -497,3 +497,8 @@ content access log every route follows.
 Indexing files, or adding a language? Read
 [`docs/indexing-library.md`](docs/indexing-library.md): the two entry points,
 the four outcomes, what a caller may rely on, and the steps for a new grammar.
+
+Calling the commit-layer library? Read [`docs/commit-layers.md`](docs/commit-layers.md):
+the order a worker must use — open the layer, store the missing blobs, publish —
+plus resolving a commit, compaction, discarding a stale layer, release and the
+three knobs.
