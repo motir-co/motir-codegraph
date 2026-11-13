@@ -207,6 +207,10 @@ describe('the functions the migrations create', () => {
     const appCallable = new Set([
       'codegraph_authenticate',
       'codegraph_bound_tenant',
+      // The queue's one cross-tenant read (0010), which a worker calls unbound.
+      'codegraph_claim_index_job',
+      // The queue's one aggregate cross-tenant read (0011): four counts, no rows.
+      'codegraph_index_queue_metrics',
       'codegraph_tenant_exists',
       ...OPERATOR_CALLS.map(([name]) => name),
     ]);

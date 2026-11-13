@@ -71,12 +71,14 @@ applied 0006_blob_fact.sql
 applied 0007_commit_layers.sql
 applied 0008_blob_fact_text_whitespace.sql
 applied 0009_tenancy_and_ref_text_whitespace.sql
+applied 0010_index_queue.sql
+applied 0011_index_queue_metrics.sql
 ```
 
 The second applies nothing:
 
 ```text
-nothing to apply (9 already applied)
+nothing to apply (11 already applied)
 ```
 
 `pnpm test` then runs the suite against the same Postgres; every test creates and
@@ -253,6 +255,29 @@ Every error the server answers carries one body,
 `pnpm build` compiles the server to `dist/`, and `pnpm start` runs the compiled
 `dist/server/main.js`. `SIGTERM` or `SIGINT` closes the listener, letting
 in-flight requests finish, and then the database pool.
+
+## Run a worker
+
+A `/v1` first-index, push or refresh call only writes a job; a worker does the
+indexing. Start one beside the server, against the same database:
+
+```sh
+mkdir -p /tmp/codegraph-scratch
+SCRATCH_DIR=/tmp/codegraph-scratch pnpm worker
+```
+
+The worker connects as `codegraph_app` (`DATABASE_APP_URL`, the server's own
+connection), claims one job at a time, and fetches each job's source under
+`SCRATCH_DIR`, an existing directory it can write and the only path it writes;
+every job's directory is deleted when the job ends. Any number of workers can
+run against one database. `pnpm start:worker` runs the compiled
+`dist/worker/main.js`, and `SIGTERM` or `SIGINT` lets the job in flight finish.
+
+The fetcher only follows https URLs, and refuses a loopback or private address.
+To index from a local https source server while developing, name its host in
+`FETCH_ALLOWED_HOSTS` (for example `FETCH_ALLOWED_HOSTS=localhost`) and point
+`NODE_EXTRA_CA_CERTS` at the certificate it serves; link-local and metadata
+addresses are refused whatever the setting says.
 
 ## Bootstrap an operator
 
@@ -505,3 +530,8 @@ Calling the commit-layer library? Read [`docs/commit-layers.md`](docs/commit-lay
 the order a worker must use — open the layer, store the missing blobs, publish —
 plus resolving a commit, compaction, discarding a stale layer, release and the
 three knobs.
+
+Running or adding to the queue? Read
+[`docs/queue-and-workers.md`](docs/queue-and-workers.md): the job row and its
+states, the claim, the worker's turn, every failure reason, batch fan-out,
+maintenance, the metrics and every setting.

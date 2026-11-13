@@ -111,3 +111,189 @@ export function readLayerSettings(env: NodeJS.ProcessEnv = process.env): LayerSe
   }
   return { compactionThreshold, hardCeiling, stagedLayerStaleness };
 }
+
+/** The compressed-source cap when `FETCH_BYTE_CAP_BYTES` is unset: 256 MiB. */
+export const DEFAULT_FETCH_BYTE_CAP_BYTES = 268_435_456;
+
+/** The extracted-bytes cap when `TAR_BYTE_CAP_BYTES` is unset: 1 GiB. */
+export const DEFAULT_TAR_BYTE_CAP_BYTES = 1_073_741_824;
+
+/** The whole-fetch deadline when `FETCH_TIMEOUT_MS` is unset: two minutes. */
+export const DEFAULT_FETCH_TIMEOUT_MS = 120_000;
+
+/**
+ * The fetcher's four settings (src/fetch): service configuration, the same for
+ * every tenant and repository, read once by the process that fetches.
+ */
+export interface FetchSettings {
+  /** Bytes. A source archive larger than this, declared or streamed, is refused. */
+  readonly byteCapBytes: number;
+  /** Bytes. An archive whose regular files extract to more than this is refused. */
+  readonly tarByteCapBytes: number;
+  /** Milliseconds for the whole fetch: every redirect, the download, the extraction and the hash. */
+  readonly timeoutMs: number;
+  /**
+   * Lower-cased bare host names whose addresses may be loopback or private (a
+   * source host inside the deployment's own network). Never exempts the
+   * link-local and instance-metadata ranges.
+   */
+  readonly allowedHosts: readonly string[];
+}
+
+/**
+ * `FETCH_ALLOWED_HOSTS`: comma-separated bare host names, matched
+ * case-insensitively, empty entries dropped. An entry carrying a scheme, a
+ * port, a path or a wildcard is a configuration error naming the variable and
+ * the entry.
+ */
+function readAllowedHosts(env: NodeJS.ProcessEnv): string[] {
+  const raw = env.FETCH_ALLOWED_HOSTS ?? '';
+  const hosts: string[] = [];
+  for (const entry of raw.split(',')) {
+    const host = entry.trim().toLowerCase();
+    if (host === '') continue;
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(host)) {
+      throw new Error(
+        `FETCH_ALLOWED_HOSTS entries must be bare host names (no scheme, port, path or wildcard), not ${entry.trim()}.`,
+      );
+    }
+    hosts.push(host);
+  }
+  return hosts;
+}
+
+/**
+ * `FETCH_BYTE_CAP_BYTES`, `TAR_BYTE_CAP_BYTES` and `FETCH_TIMEOUT_MS`, each
+ * defaulted when unset or blank (256 MiB, 1 GiB and 120,000 ms) and refused
+ * naming its variable when it is not a whole number of 1 or more, and
+ * `FETCH_ALLOWED_HOSTS`. Reads nothing else.
+ */
+export function readFetchSettings(env: NodeJS.ProcessEnv = process.env): FetchSettings {
+  return {
+    byteCapBytes: readPositiveWhole(env, 'FETCH_BYTE_CAP_BYTES', DEFAULT_FETCH_BYTE_CAP_BYTES),
+    tarByteCapBytes: readPositiveWhole(env, 'TAR_BYTE_CAP_BYTES', DEFAULT_TAR_BYTE_CAP_BYTES),
+    timeoutMs: readPositiveWhole(env, 'FETCH_TIMEOUT_MS', DEFAULT_FETCH_TIMEOUT_MS),
+    allowedHosts: readAllowedHosts(env),
+  };
+}
+
+/** How long an idle worker waits before it claims again, when `WORKER_POLL_MS` is unset. */
+export const DEFAULT_WORKER_POLL_MS = 1_000;
+
+/** A claimed job's lease when `JOB_LEASE_MS` is unset: five minutes. */
+export const DEFAULT_JOB_LEASE_MS = 300_000;
+
+/** Claims a job may have before it ends `attempts_exhausted`, when `MAX_ATTEMPTS` is unset. */
+export const DEFAULT_MAX_ATTEMPTS = 3;
+
+/** One run's largest store, and one batch's slice, when `BLOB_STORE_BATCH_SIZE` is unset. */
+export const DEFAULT_BLOB_STORE_BATCH_SIZE = 500;
+
+/**
+ * The indexer worker's settings: service configuration, the same for every
+ * tenant and repository, read once by the worker process.
+ */
+export interface WorkerSettings {
+  /** Milliseconds an idle worker waits before claiming again. */
+  readonly pollMs: number;
+  /** Milliseconds a claim's lease runs from each renewal. */
+  readonly jobLeaseMs: number;
+  /** The claim at which a job that keeps losing its lease ends `attempts_exhausted`. */
+  readonly maxAttempts: number;
+  /** The directory the worker writes each job's source under; the only path it writes. */
+  readonly scratchDir: string;
+  /**
+   * The most missing blobs a run stores itself, between two lease renewals. A
+   * job missing more is fanned out into batch rows of at most this many.
+   */
+  readonly blobStoreBatchSize: number;
+}
+
+/**
+ * `WORKER_POLL_MS`, `JOB_LEASE_MS`, `MAX_ATTEMPTS` and `BLOB_STORE_BATCH_SIZE`,
+ * each defaulted when unset or blank and refused naming its variable when it is
+ * not a whole number of 1 or more, and `SCRATCH_DIR`, which is required and
+ * may not be blank. Reads nothing else.
+ */
+export function readWorkerSettings(env: NodeJS.ProcessEnv = process.env): WorkerSettings {
+  const pollMs = readPositiveWhole(env, 'WORKER_POLL_MS', DEFAULT_WORKER_POLL_MS);
+  const jobLeaseMs = readPositiveWhole(env, 'JOB_LEASE_MS', DEFAULT_JOB_LEASE_MS);
+  const maxAttempts = readPositiveWhole(env, 'MAX_ATTEMPTS', DEFAULT_MAX_ATTEMPTS);
+  const blobStoreBatchSize = readPositiveWhole(
+    env,
+    'BLOB_STORE_BATCH_SIZE',
+    DEFAULT_BLOB_STORE_BATCH_SIZE,
+  );
+  const scratchDir = env.SCRATCH_DIR ?? '';
+  if (scratchDir.trim() === '') {
+    throw new Error('SCRATCH_DIR must name the directory the worker writes job sources under.');
+  }
+  return { pollMs, jobLeaseMs, maxAttempts, scratchDir, blobStoreBatchSize };
+}
+
+/** The least time between two maintenance ticks of one repository, by default. */
+export const DEFAULT_MAINTENANCE_INTERVAL_MS = 60_000;
+
+/** The most maintenance jobs one tick enqueues, when `MAINTENANCE_JOBS_PER_TICK` is unset. */
+export const DEFAULT_MAINTENANCE_JOBS_PER_TICK = 3;
+
+/**
+ * How often the worker's maintenance tick looks at a repository, and how much
+ * one look may enqueue: service configuration, the same for every tenant and
+ * repository, read once by the worker process.
+ */
+export interface MaintenanceSettings {
+  /** Milliseconds between two ticks for the same repository, at least. */
+  readonly intervalMs: number;
+  /** Jobs one tick enqueues, at most. */
+  readonly jobsPerTick: number;
+}
+
+/**
+ * `MAINTENANCE_INTERVAL_MS` and `MAINTENANCE_JOBS_PER_TICK`, each defaulted
+ * when unset or blank (60,000 ms and 3) and refused naming its variable when
+ * it is not a whole number of 1 or more. Reads nothing else.
+ */
+export function readMaintenanceSettings(env: NodeJS.ProcessEnv = process.env): MaintenanceSettings {
+  return {
+    intervalMs: readPositiveWhole(env, 'MAINTENANCE_INTERVAL_MS', DEFAULT_MAINTENANCE_INTERVAL_MS),
+    jobsPerTick: readPositiveWhole(
+      env,
+      'MAINTENANCE_JOBS_PER_TICK',
+      DEFAULT_MAINTENANCE_JOBS_PER_TICK,
+    ),
+  };
+}
+
+/** How often the worker publishes the queue's numbers, when `METRICS_INTERVAL_MS` is unset. */
+export const DEFAULT_METRICS_INTERVAL_MS = 30_000;
+
+/** The trailing window failures are counted over, when `FAILED_JOBS_WINDOW_MS` is unset. */
+export const DEFAULT_FAILED_JOBS_WINDOW_MS = 300_000;
+
+/**
+ * The queue-metrics publisher's settings: service configuration, the same for
+ * every tenant, read once by the worker process.
+ */
+export interface MetricsSettings {
+  /** Milliseconds between two published samples of the queue. */
+  readonly metricsInterval: number;
+  /** Milliseconds back from a sample that `FailedJobsRecent` counts over. */
+  readonly failedJobsWindow: number;
+}
+
+/**
+ * `METRICS_INTERVAL_MS` and `FAILED_JOBS_WINDOW_MS`, each defaulted when unset
+ * or blank (30,000 ms and 300,000 ms) and refused naming its variable and the
+ * value when it is not a whole number of 1 or more. Reads nothing else.
+ */
+export function readMetricsSettings(env: NodeJS.ProcessEnv = process.env): MetricsSettings {
+  return {
+    metricsInterval: readPositiveWhole(env, 'METRICS_INTERVAL_MS', DEFAULT_METRICS_INTERVAL_MS),
+    failedJobsWindow: readPositiveWhole(
+      env,
+      'FAILED_JOBS_WINDOW_MS',
+      DEFAULT_FAILED_JOBS_WINDOW_MS,
+    ),
+  };
+}

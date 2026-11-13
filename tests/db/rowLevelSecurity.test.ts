@@ -30,6 +30,8 @@ const TENANT_TABLES = [
   'commit_layers',
   'layer_paths',
   'ref_heads',
+  'index_jobs',
+  'index_job_batches',
 ] as const;
 
 let db: FreshDatabase;
@@ -280,6 +282,8 @@ describe('the policy shape', () => {
       commit_layers: 'tenant_id',
       layer_paths: 'tenant_id',
       ref_heads: 'tenant_id',
+      index_jobs: 'tenant_id',
+      index_job_batches: 'tenant_id',
     };
     const expected = [...TENANT_TABLES].sort().flatMap((table) => {
       const bound = `(${column[table]} = ( SELECT codegraph.codegraph_bound_tenant() AS codegraph_bound_tenant))`;

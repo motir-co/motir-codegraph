@@ -134,6 +134,18 @@ policy instead. `codegraph.codegraph_tenant_exists(tenant_id)` returns only
 whether the tenant exists; the two delete routes use it so a retried delete of
 a tenant that is gone answers 404 rather than 403.
 
+Migrations 0010 and 0011 add the indexing queue's two cross-tenant reads, both
+callable by `codegraph_app` with nothing bound, because a worker pool serves
+every tenant. `codegraph.codegraph_claim_index_job(lease_ms, max_attempts)`
+(0010) claims one job or batch and answers ids and the token it minted, never a
+row a tenant wrote. `codegraph.codegraph_index_queue_metrics(p_failed_window_ms)`
+(0011) is `STABLE` and answers one row of four whole numbers (queued jobs,
+queued or running batches, the oldest queued job's age in seconds, and the jobs
+that failed inside the window) with no identifier at all. They are the only two:
+any other read of the queue runs bound to one tenant. In `src/`,
+`src/db/workerJobs.ts` names the first and `src/db/queueMetrics.ts` alone names
+the second.
+
 ## 7. Migrations
 
 A schema change is one new plain-SQL file under [`db/migrations/`](../db/migrations),

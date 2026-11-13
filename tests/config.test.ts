@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  DEFAULT_FETCH_BYTE_CAP_BYTES,
+  DEFAULT_FETCH_TIMEOUT_MS,
+  DEFAULT_TAR_BYTE_CAP_BYTES,
+  readFetchSettings,
+  readWorkerSettings,
   DEFAULT_COMPACTION_THRESHOLD,
   DEFAULT_HARD_CEILING,
   DEFAULT_PER_FILE_CAP_BYTES,
   DEFAULT_STAGED_LAYER_STALENESS_MS,
   perFileCapBytes,
   readLayerSettings,
+  readMaintenanceSettings,
+  readMetricsSettings,
   requireEnv,
 } from '../src/config.js';
 
@@ -142,5 +149,147 @@ describe('readLayerSettings', () => {
       if (before === undefined) delete process.env.HARD_CEILING;
       else process.env.HARD_CEILING = before;
     }
+  });
+});
+
+describe('readFetchSettings', () => {
+  it('defaults the three numbers when unset or blank, and allows no host', () => {
+    for (const env of [
+      {},
+      { FETCH_BYTE_CAP_BYTES: '', TAR_BYTE_CAP_BYTES: ' ', FETCH_TIMEOUT_MS: '' },
+    ]) {
+      expect(readFetchSettings(env)).toEqual({
+        byteCapBytes: DEFAULT_FETCH_BYTE_CAP_BYTES,
+        tarByteCapBytes: DEFAULT_TAR_BYTE_CAP_BYTES,
+        timeoutMs: DEFAULT_FETCH_TIMEOUT_MS,
+        allowedHosts: [],
+      });
+    }
+    // Above a motir-core-sized archive; the timeout well below the 10-minute target.
+    expect(DEFAULT_FETCH_BYTE_CAP_BYTES).toBe(256 * 1024 * 1024);
+    expect(DEFAULT_TAR_BYTE_CAP_BYTES).toBe(1024 * 1024 * 1024);
+    expect(DEFAULT_FETCH_TIMEOUT_MS).toBeLessThan(600_000);
+  });
+
+  it('reads each number, and refuses one that is not a positive whole number, naming it', () => {
+    expect(
+      readFetchSettings({
+        FETCH_BYTE_CAP_BYTES: '1000',
+        TAR_BYTE_CAP_BYTES: '2000',
+        FETCH_TIMEOUT_MS: '3000',
+      }),
+    ).toMatchObject({ byteCapBytes: 1000, tarByteCapBytes: 2000, timeoutMs: 3000 });
+    for (const name of ['FETCH_BYTE_CAP_BYTES', 'TAR_BYTE_CAP_BYTES', 'FETCH_TIMEOUT_MS']) {
+      for (const bad of ['0', '-1', '1.5', 'lots']) {
+        expect(() => readFetchSettings({ [name]: bad })).toThrow(name);
+      }
+    }
+  });
+
+  it('reads the allowed hosts as bare, lower-cased names, dropping empty entries', () => {
+    expect(
+      readFetchSettings({ FETCH_ALLOWED_HOSTS: ' Git.Internal ,, source-host,localhost,' })
+        .allowedHosts,
+    ).toEqual(['git.internal', 'source-host', 'localhost']);
+  });
+
+  it('refuses an allowed host carrying a scheme, a port, a path or a wildcard, naming the variable and the entry', () => {
+    for (const bad of [
+      'https://git.internal',
+      'git.internal:8443',
+      'git.internal/repo',
+      '*.internal',
+    ]) {
+      expect(() => readFetchSettings({ FETCH_ALLOWED_HOSTS: `ok.host, ${bad}` })).toThrow(
+        new RegExp(`FETCH_ALLOWED_HOSTS.*${bad.replace(/[\\^$.*+?()[\]{}|/:]/g, '\\$&')}`),
+      );
+    }
+  });
+});
+
+describe('readWorkerSettings', () => {
+  it('defaults every numeric setting and requires SCRATCH_DIR', () => {
+    expect(readWorkerSettings({ SCRATCH_DIR: '/scratch' })).toEqual({
+      pollMs: 1_000,
+      jobLeaseMs: 300_000,
+      maxAttempts: 3,
+      scratchDir: '/scratch',
+      blobStoreBatchSize: 500,
+    });
+    expect(
+      readWorkerSettings({
+        SCRATCH_DIR: '/s',
+        WORKER_POLL_MS: '250',
+        JOB_LEASE_MS: '60000',
+        MAX_ATTEMPTS: '5',
+        BLOB_STORE_BATCH_SIZE: '20',
+      }),
+    ).toEqual({
+      pollMs: 250,
+      jobLeaseMs: 60_000,
+      maxAttempts: 5,
+      scratchDir: '/s',
+      blobStoreBatchSize: 20,
+    });
+  });
+
+  it('refuses a malformed number naming its variable, and a missing or blank SCRATCH_DIR', () => {
+    for (const name of [
+      'WORKER_POLL_MS',
+      'JOB_LEASE_MS',
+      'MAX_ATTEMPTS',
+      'BLOB_STORE_BATCH_SIZE',
+    ]) {
+      for (const value of ['0', '-1', '1.5', 'soon']) {
+        expect(() => readWorkerSettings({ SCRATCH_DIR: '/s', [name]: value })).toThrow(name);
+      }
+    }
+    expect(() => readWorkerSettings({})).toThrow('SCRATCH_DIR');
+    expect(() => readWorkerSettings({ SCRATCH_DIR: '  ' })).toThrow('SCRATCH_DIR');
+  });
+});
+
+describe('readMaintenanceSettings', () => {
+  it('defaults both settings when unset or blank, and reads whole numbers', () => {
+    expect(readMaintenanceSettings({})).toEqual({ intervalMs: 60_000, jobsPerTick: 3 });
+    expect(
+      readMaintenanceSettings({ MAINTENANCE_INTERVAL_MS: ' ', MAINTENANCE_JOBS_PER_TICK: '' }),
+    ).toEqual({ intervalMs: 60_000, jobsPerTick: 3 });
+    expect(
+      readMaintenanceSettings({ MAINTENANCE_INTERVAL_MS: '5000', MAINTENANCE_JOBS_PER_TICK: '1' }),
+    ).toEqual({ intervalMs: 5_000, jobsPerTick: 1 });
+  });
+
+  it('refuses a value that is not a whole number of 1 or more, naming its variable', () => {
+    for (const name of ['MAINTENANCE_INTERVAL_MS', 'MAINTENANCE_JOBS_PER_TICK']) {
+      for (const bad of ['0', '-1', '1.5', 'ten']) {
+        expect(() => readMaintenanceSettings({ [name]: bad })).toThrow(name);
+      }
+    }
+  });
+});
+
+describe('readMetricsSettings', () => {
+  it('defaults both settings when unset or blank, and reads whole numbers', () => {
+    expect(readMetricsSettings({})).toEqual({ metricsInterval: 30_000, failedJobsWindow: 300_000 });
+    expect(readMetricsSettings({ METRICS_INTERVAL_MS: '', FAILED_JOBS_WINDOW_MS: '  ' })).toEqual({
+      metricsInterval: 30_000,
+      failedJobsWindow: 300_000,
+    });
+    expect(
+      readMetricsSettings({ METRICS_INTERVAL_MS: '1000', FAILED_JOBS_WINDOW_MS: '60000' }),
+    ).toEqual({ metricsInterval: 1_000, failedJobsWindow: 60_000 });
+  });
+
+  it.each([
+    ['METRICS_INTERVAL_MS', '0'],
+    ['METRICS_INTERVAL_MS', '-5'],
+    ['METRICS_INTERVAL_MS', '2.5'],
+    ['FAILED_JOBS_WINDOW_MS', 'soon'],
+    ['FAILED_JOBS_WINDOW_MS', '1e3'],
+  ])('refuses %s=%s, naming the variable and the value', (name, value) => {
+    expect(() => readMetricsSettings({ [name]: value })).toThrow(
+      `${name} must be a whole number of 1 or more, not ${value}.`,
+    );
   });
 });

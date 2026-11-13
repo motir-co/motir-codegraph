@@ -129,7 +129,8 @@ describe('codegraph_app, the login the service runs as', () => {
         FROM unnest(ARRAY['tenants','repositories','clients','credentials','grants',
                           'content_access_log','schema_migrations',
                           'blob','blob_contents','blob_fact',
-                          'commit_layers','layer_paths','ref_heads']) t,
+                          'commit_layers','layer_paths','ref_heads',
+                          'index_jobs','index_job_batches']) t,
              unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p
         ORDER BY 1, 2`)
         ).rows,
@@ -137,7 +138,8 @@ describe('codegraph_app, the login the service runs as', () => {
     const allowed = matrix
       .filter((row) => row.allowed)
       .map((row) => `${row.table}:${row.privilege}`);
-    // UPDATE on commit_layers and ref_heads is granted per column, so it is
+    // UPDATE on commit_layers, ref_heads and the two queue tables is granted
+    // per column, so it is
     // measured by the column-privilege read below, not here.
     expect(allowed.sort()).toEqual(
       [
@@ -154,6 +156,12 @@ describe('codegraph_app, the login the service runs as', () => {
         'commit_layers:INSERT',
         'commit_layers:SELECT',
         'content_access_log:INSERT',
+        'index_job_batches:DELETE',
+        'index_job_batches:INSERT',
+        'index_job_batches:SELECT',
+        'index_jobs:DELETE',
+        'index_jobs:INSERT',
+        'index_jobs:SELECT',
         'layer_paths:DELETE',
         'layer_paths:INSERT',
         'layer_paths:SELECT',
@@ -187,6 +195,20 @@ describe('codegraph_app, the login the service runs as', () => {
       { table: 'commit_layers', column: 'published_at' },
       { table: 'commit_layers', column: 'state' },
       { table: 'commit_layers', column: 'superseded_at' },
+      { table: 'index_job_batches', column: 'claimed_by' },
+      { table: 'index_job_batches', column: 'ended_at' },
+      { table: 'index_job_batches', column: 'failure_message' },
+      { table: 'index_job_batches', column: 'failure_reason_code' },
+      { table: 'index_job_batches', column: 'lease_expires_at' },
+      { table: 'index_job_batches', column: 'state' },
+      { table: 'index_job_batches', column: 'stored_count' },
+      { table: 'index_jobs', column: 'claimed_by' },
+      { table: 'index_jobs', column: 'ended_at' },
+      { table: 'index_jobs', column: 'failure_message' },
+      { table: 'index_jobs', column: 'failure_reason_code' },
+      { table: 'index_jobs', column: 'fetch_url' },
+      { table: 'index_jobs', column: 'lease_expires_at' },
+      { table: 'index_jobs', column: 'state' },
       { table: 'ref_heads', column: 'commit_sha' },
       { table: 'ref_heads', column: 'is_default_branch' },
       { table: 'ref_heads', column: 'layer_id' },
