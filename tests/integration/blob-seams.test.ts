@@ -528,8 +528,53 @@ describe('the fact table’s own refusals', () => {
     ['module_specifier', { ...base('import'), module_specifier: ' ' }],
     ['parent_name', { ...base('inheritance'), parent_name: ' ' }],
     ['enclosing_name', { ...base('definition'), enclosing_name: ' ' }],
+    // Not only spaces: one-argument btrim strips spaces alone, so before 0008
+    // these four passed the check (MOTIR-11149).
+    ['tab-only extractor_version', { ...base('definition'), extractor_version: '\t' }],
+    ['newline-only name', { ...base('definition'), name: '\n' }],
+    ['tab-only language', { ...base('reference'), language: '\t' }],
+    ['mixed-whitespace parent_name', { ...base('inheritance'), parent_name: ' \t\r\n' }],
+    ['empty producer', { ...base('import'), producer: '' }],
   ])('refuses a whitespace-only %s', async (_label, row) => {
     expect(await attempt(row)).toBe(CHECK_VIOLATION);
+  });
+
+  // The check's "blank" is the extractor's: buildFacts drops a fact whose name
+  // is blank by String.prototype.trim(), so the database refuses exactly the
+  // characters trim() strips. The set is derived here from trim() itself, so a
+  // character the check misses fails the first case; the admits cases below
+  // pin the near misses trim() keeps.
+  const codePoints = Array.from({ length: 0x3001 }, (_, c) => c)
+    .concat(0xfeff)
+    .filter((c) => c < 0xd800 || c > 0xdfff);
+  const blank = codePoints.filter((c) => String.fromCodePoint(c).trim() === '');
+  const hex = (c: number): string => `U+${c.toString(16).toUpperCase().padStart(4, '0')}`;
+
+  it('refuses every character String.prototype.trim() strips, alone and repeated', async () => {
+    expect(blank.length).toBe(25);
+    for (const c of blank) {
+      const ch = String.fromCodePoint(c);
+      expect(await attempt({ ...base('definition'), name: ch }), hex(c)).toBe(CHECK_VIOLATION);
+      expect(
+        await attempt({ ...base('definition'), extractor_version: ch.repeat(3) }),
+        hex(c),
+      ).toBe(CHECK_VIOLATION);
+    }
+  });
+
+  it.each<[string, Row]>([
+    // The letters a misspelt E'\v' / E'\t' / E'\n' set would strip.
+    ['a name that is a letter v', { ...base('definition'), name: 'v' }],
+    ['a name that is a letter t', { ...base('reference'), name: 't' }],
+    ['a name that is a letter n', { ...base('inheritance'), name: 'n' }],
+    ['a name padded with tabs', { ...base('definition'), name: '\tf\n' }],
+    ['a module specifier with a space inside', { ...base('import'), module_specifier: 'a b' }],
+    // trim() keeps these, so the check does too.
+    ['a zero-width space', { ...base('definition'), name: '​' }],
+    ['a next-line control', { ...base('definition'), name: '\u0085' }],
+    ['a Mongolian vowel separator', { ...base('definition'), name: '᠎' }],
+  ])('admits %s', async (_label, row) => {
+    expect(await attempt(row)).toBeNull();
   });
 
   it('refuses a second identical fact, absent columns included, and at a bumped version', async () => {
