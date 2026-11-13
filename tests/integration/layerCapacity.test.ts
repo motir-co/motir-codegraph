@@ -28,9 +28,14 @@ import {
   LINEAGE_CHANGED_PATHS,
   MAP_PATHS,
   measure,
+  measurePaired,
   planOf,
   recordWithParams,
+  describePaired,
+  RESOLVE_OVERHEAD_LIMIT,
+  RESOLVE_REPETITIONS,
   RESOLVE_TARGET_MS,
+  resolutionMisses,
   type Readings,
 } from './layerCapacity.fixture.js';
 
@@ -40,8 +45,14 @@ import {
 // sits at the configured hard ceiling resolved within 150 ms; a commit past the
 // compaction threshold compacted within 60 s with every write bounded. Each
 // window covers exactly the shipped call; seeding happens before it and is
-// printed on its own line. The median of three measured repetitions after one
-// discarded warm-up is asserted, never retried and never against another number.
+// printed on its own line. The median of the measured repetitions after one
+// discarded warm-up is asserted, never retried.
+//
+// The resolution window is ~100 ms, small enough that a shared runner's speed
+// moved it past its target with no change to the code (MOTIR-11228). It is
+// timed PAIRED with a same-run baseline read of the same row count and asserted
+// as a ratio over it, with a loose absolute backstop; the 150 ms target is
+// printed beside the readings (layerCapacity.fixture.ts says why and how).
 
 const settings = readLayerSettings(); // the configuration in force decides the depths
 
@@ -103,6 +114,32 @@ async function bound<T>(fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
     await c.query('ROLLBACK');
     c.release();
   }
+}
+
+/**
+ * The resolution gate's same-run baseline: ONE layer's own rows, path → blob,
+ * read on the caller's bound transaction, SORTED BY PATH IN THE DATABASE'S
+ * COLLATION and decoded into a Map. It is the work any resolution of a map that
+ * size pays — the same row count over the same connection under the same
+ * row-level security, and a 20,000-path sort in the same collation — and
+ * nothing of the chain. `path || ''` keeps the primary key from supplying the
+ * order, so the sort is really done: under a linguistic collation (CI's
+ * `en_US.utf8`) a path comparison costs several times what it does under `C`,
+ * and a baseline that skipped the sort would make the ratio a property of the
+ * collation instead of the statement.
+ */
+async function readLayerMap(
+  c: pg.ClientBase,
+  on: LayerScope,
+  layerId: string,
+): Promise<Map<string, string>> {
+  const { rows } = await c.query<{ path: string; git_blob_hash: string }>(
+    `SELECT path, git_blob_hash FROM codegraph.layer_paths
+     WHERE tenant_id = $1 AND repository_id = $2 AND layer_id = $3
+     ORDER BY path || ''`,
+    [on.tenantId, on.repositoryId, layerId],
+  );
+  return new Map(rows.map((r) => [r.path, r.git_blob_hash]));
 }
 
 async function resolvedMap(sha: string): Promise<Map<string, string>> {
@@ -196,34 +233,45 @@ describe('commit-layer capacity', () => {
     }
   }, 300_000);
 
-  it(`resolves the ${String(MAP_PATHS)}-path commit at the hard ceiling within ${String(RESOLVE_TARGET_MS)} ms`, async () => {
+  it(`resolves the ${String(MAP_PATHS)}-path commit at the hard ceiling within ${String(RESOLVE_OVERHEAD_LIMIT)}× a same-run ${String(MAP_PATHS)}-row read (target ${String(RESOLVE_TARGET_MS)} ms)`, async () => {
     const top = lineage[lineage.length - 1];
     if (top === undefined) throw new Error('no lineage');
     const layer = await bound((c) => readCurrentPublishedLayer(c, scope, top.sha));
     expect(layer?.depth).toBe(settings.hardCeiling - 1);
     expect(layer?.chain).toHaveLength(settings.hardCeiling);
+    const baseLayer = await bound((c) => readCurrentPublishedLayer(c, scope, base.sha));
+    if (baseLayer === null) throw new Error('the base has no current layer');
 
-    const readings = await measure(
+    const paired = await measurePaired(
       async () => {
         const c = await pool.connect();
         await c.query('BEGIN');
         await c.query(BIND_TENANT_SQL, [clientId, scope.tenantId]);
         return c;
       },
+      (_pass, c) => readLayerMap(c, scope, baseLayer.id),
       (_pass, c) => resolveCommit(c, scope.tenantId, scope.repositoryId, top.sha),
-      async (_pass, resolution: Resolution, c) => {
+      async (_pass, baselineMap, resolution: Resolution, c) => {
         await c.query('ROLLBACK');
         c.release();
+        expect(sameMap(baselineMap, base.map)).toBe(true);
         expect(resolution.state).toBe('indexed');
         const paths = (resolution as { paths: Map<string, string> }).paths;
         expect(paths.size).toBe(MAP_PATHS);
         expect(sameMap(paths, top.map)).toBe(true);
       },
+      RESOLVE_REPETITIONS,
     );
-    console.log(describeReadings('resolution at the ceiling', RESOLVE_TARGET_MS, readings));
-    if (readings.median > RESOLVE_TARGET_MS) {
+    const misses = resolutionMisses(paired);
+    console.log(describePaired('resolution at the ceiling', paired));
+    if (misses.length > 0) {
       throw new Error(
-        await missReport('resolution at the ceiling', RESOLVE_TARGET_MS, readings, top.sha),
+        await missReport(
+          `resolution at the ceiling (${misses.join('; ')})`,
+          RESOLVE_TARGET_MS,
+          paired.measured,
+          top.sha,
+        ),
       );
     }
   }, 120_000);
