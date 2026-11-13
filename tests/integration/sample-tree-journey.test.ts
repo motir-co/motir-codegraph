@@ -13,13 +13,12 @@ import {
 import { MIGRATIONS_DIR } from '../../src/db/migrate.js';
 import { queryRows, withClient } from '../helpers/db.js';
 import { runScript, type CommandResult } from '../helpers/processes.js';
-import { escapeRegExp } from '../helpers/regexp.js';
 import { asOperator, inBoundTransaction } from '../helpers/tenancy.js';
 import { foundation, type Foundation } from './foundation.fixture.js';
 
 // The story's verification recipe as one journey over the bundled sample tree:
-// every mode of `pnpm fixture:sample-tree` runs as a separate process, started
-// the way its package.json script starts it, against one real database the
+// every mode of `pnpm fixture:sample-tree`, and then `pnpm reextract`, runs as a
+// separate process, started the way its package.json script starts it, against one real database the
 // suite bootstraps and drops. Each step asserts on the state the step before
 // it left, so the cases run in order. Rows are read back with the journey's
 // own SQL, bound exactly as a request binds; this story ships no read surface.
@@ -98,6 +97,13 @@ const appEnv = (): NodeJS.ProcessEnv => ({ DATABASE_APP_URL: f.db.appUrl });
 
 function sampleTree(args: string[], env: NodeJS.ProcessEnv = appEnv()): Promise<CommandResult> {
   return runScript('fixture:sample-tree', env, args);
+}
+
+/** The facts the reextract command's batch lines report, summed. */
+function sumFacts(lines: readonly string[]): number {
+  return lines
+    .filter((line) => line.startsWith('batch '))
+    .reduce((sum, line) => sum + Number(/ facts=(\d+)$/.exec(line)?.[1] ?? Number.NaN), 0);
 }
 
 function succeeded(result: CommandResult): string[] {
@@ -600,11 +606,18 @@ describe('the sample tree, through the shipped library and its fixture command',
       expect(current).toBeDefined();
       const ownerEnv = { DATABASE_URL: f.db.ownerUrl };
 
-      // The re-extract mode refuses any login but the owner, and writes nothing.
-      const refused = await sampleTree(['reextract', '--language', REEXTRACTED], {
-        DATABASE_URL: f.db.appUrl,
-      });
-      expect(refused.code).not.toBe(0);
+      // Re-extraction is its own command now, not a fixture mode.
+      const noMode = await sampleTree(['reextract']);
+      expect(noMode.code).not.toBe(0);
+      expect(noMode.stderr).toContain('usage: pnpm fixture:sample-tree');
+      expect(noMode.stderr).not.toMatch(/^\s*reextract\s/m);
+
+      // The command refuses any login but the owner, and writes nothing.
+      const refused = await runScript('reextract', { DATABASE_URL: f.db.appUrl }, [
+        '--language',
+        REEXTRACTED,
+      ]);
+      expect(refused.code).toBe(1);
       expect(refused.stderr).toContain('must run as codegraph_owner');
       expect(refused.stderr).toContain('not as codegraph_app');
 
@@ -648,19 +661,17 @@ describe('the sample tree, through the shipped library and its fixture command',
       );
       expect(stale).toHaveLength(2);
 
-      const lines = succeeded(await sampleTree(['reextract', '--language', REEXTRACTED], ownerEnv));
-      const moved = lines.filter((line) => line.startsWith('batch '));
-      expect(moved).toHaveLength(2);
-      for (const { tenant_id, hash } of stale) {
-        expect(moved).toContainEqual(
-          expect.stringMatching(new RegExp(`^batch 1 tenant=${tenant_id} ${hash} facts=\\d+$`)),
-        );
-      }
-      expect(lines.at(-1)).toMatch(
-        new RegExp(
-          `^reextract ${REEXTRACTED} to ${escapeRegExp(current ?? '')}: batches=1 blobs=2 facts=\\d+$`,
-        ),
+      const lines = succeeded(await runScript('reextract', ownerEnv, ['--language', REEXTRACTED]));
+      expect(lines[0]).toBe(`plan: 1 language(s) have stale blobs: ${REEXTRACTED}`);
+      expect(lines).toContain(
+        `language=${REEXTRACTED} version=${current ?? ''} status=swept blobs=2 facts=${String(
+          sumFacts(lines),
+        )}`,
       );
+      expect(lines.at(-1)).toMatch(
+        /^reextract: languages=1 swept=1 skipped=0 failed=0 blobs=2 facts=\d+$/,
+      );
+      expect(stale.map((row) => row.tenant_id).sort()).toEqual([tenantA, tenantB].sort());
 
       const after = await withClient(f.db.ownerUrl, (c) =>
         queryRows<{ blob_version: string; fact_versions: string[] }>(

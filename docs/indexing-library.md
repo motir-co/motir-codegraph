@@ -218,6 +218,15 @@ version moves: `reextractLanguage('<id>')` rebuilds them from their stored
 contents, each blob's facts and recorded state moving in one transaction. No
 re-store and no fetch is needed.
 
+The sweep is run as `pnpm reextract`, on the owner login in `DATABASE_URL`
+(any other login is refused by name before anything is read). It asks the
+same staleness predicate the sweep pages over which registered languages have
+a stale blob, then rebuilds each through `reextractLanguage`, printing one
+line per batch, one per language and a total. `--language <id>` narrows it to
+one language. A language another run holds is reported skipped, one that
+fails is reported failed and the next is still swept, and the command exits 0
+only when every language it planned came back drained.
+
 **A language with no maintained grammar** is registered as having none, in
 [`unavailable.ts`](../src/indexer/languages/unavailable.ts), with the reason.
 Its files return `unsupported` with their contents stored and its id recorded

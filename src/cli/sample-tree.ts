@@ -1,6 +1,6 @@
 // `pnpm fixture:sample-tree <mode> [flags]`: drive the indexing library over
 // the bundled sample tree, the way an indexer worker will, and print what it
-// stored. Three modes:
+// stored. Two modes:
 //
 //   store      --tenant <id> --client <id> --repository <id> [--tree <dir>]
 //              Stores every file of the tree for the tenant, in sorted path
@@ -9,11 +9,8 @@
 //   show       --tenant <id> --client <id> --path <path> [--tree <dir>]
 //              Prints one file's stored outcome, its fact rows and its stored
 //              contents, read under the same binding.
-//   reextract  --language <id>
-//              Runs the shipped re-extraction for one language on the owner
-//              login (DATABASE_URL) and prints what it moved, batch by batch.
-//              It takes no client and no tenant: the sweep binds nothing and
-//              reaches every tenant, and refuses any other login.
+//
+// Re-extraction is not a fixture mode: it is `pnpm reextract`.
 //
 // The store and show modes refuse, before writing or reading anything, a
 // client that holds no live grant on the tenant: a tenant id alone binds
@@ -27,7 +24,6 @@ import pg from 'pg';
 
 import { requireEnv } from '../config.js';
 import { gitBlobHash } from '../fetch/gitBlob.js';
-import { reextractLanguage } from '../indexing/reextract.js';
 import { storeBlob, type StoredBlob } from '../indexing/storeBlob.js';
 import { BIND_TENANT_SQL } from '../server/binding.js';
 
@@ -39,10 +35,9 @@ const USAGE = `usage: pnpm fixture:sample-tree <mode> [flags]
 modes:
   store      --tenant <id> --client <id> --repository <id> [--tree <dir>]
   show       --tenant <id> --client <id> --path <path> [--tree <dir>]
-  reextract  --language <id>
 
   --tree defaults to the bundled fixtures/sample-tree.
-  store and show connect as DATABASE_APP_URL; reextract as DATABASE_URL.
+  store and show connect as DATABASE_APP_URL.
   -h, --help prints this text.`;
 
 class UsageError extends Error {}
@@ -259,34 +254,9 @@ async function show(values: Record<string, unknown>): Promise<void> {
   });
 }
 
-async function reextract(values: Record<string, unknown>): Promise<void> {
-  const language = required(values, 'language');
-  const report = await reextractLanguage(language, {
-    connectionString: requireEnv('DATABASE_URL'),
-  });
-  if (report.anotherRunInProgress) {
-    console.log(`reextract ${language}: another run holds this language's lock; nothing moved`);
-    return;
-  }
-  for (const batch of report.batches) {
-    for (const blob of batch.blobs) {
-      console.log(
-        `batch ${String(batch.ordinal)} tenant=${blob.tenantId} ${blob.gitBlobHash} ` +
-          `facts=${String(blob.factCount)}`,
-      );
-    }
-  }
-  console.log(
-    `reextract ${language} to ${field(report.extractorVersion)}: ` +
-      `batches=${String(report.batches.length)} blobs=${String(report.blobCount)} ` +
-      `facts=${String(report.factCount)}`,
-  );
-}
-
 const MODES: Record<string, (values: Record<string, unknown>) => Promise<void>> = {
   store,
   show,
-  reextract,
 };
 
 try {
@@ -298,7 +268,6 @@ try {
       repository: { type: 'string' },
       path: { type: 'string' },
       tree: { type: 'string' },
-      language: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
   });

@@ -17,6 +17,7 @@
     "build": "tsc -p tsconfig.build.json",
     "db:bootstrap": "node --env-file-if-exists=.env --import tsx src/cli/bootstrap.ts",
     "db:migrate": "node --env-file-if-exists=.env --import tsx src/cli/migrate.ts",
+    "reextract": "node --env-file-if-exists=.env --import tsx src/cli/reextract.ts",
     "operator:bootstrap": "node --env-file-if-exists=.env --import tsx src/cli/bootstrap-operator.ts",
     "serve": "node --env-file-if-exists=.env --import tsx src/server/main.ts",
     "fixture:sample-tree": "node --env-file-if-exists=.env --import tsx src/cli/sample-tree.ts",
