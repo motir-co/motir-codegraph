@@ -130,11 +130,15 @@ The rules:
   `tenant_not_found` / `client_not_found`.
 - **A refusal is never an empty answer.** A route never answers 200 with an
   empty list or object for something the caller may not see.
+- **A body is validated as sent, never converted.** A value of the wrong JSON
+  type is 400 `invalid_request` — `7` where a string belongs is refused, not
+  stored as `"7"` — and a field the schema does not name is 400, not dropped.
 
 - Source: `src/server/errors.ts` (`ERROR_STATUS`, `ApiError`, `handleError`,
   `handleNotFound`), `src/server/binding.ts` (`checkTenantAccess`,
-  `requireOperator`, `resolveRepository`).
-- Tests: `tests/server/errors.test.ts` (each code, the body, database errors),
+  `requireOperator`, `resolveRepository`), `src/server/app.ts`
+  (`STRICT_AJV_OPTIONS`).
+- Tests: `tests/server/errors.test.ts` (each code, the body, body validation, database errors),
   `tests/server/isolation.test.ts`, `tests/server/auth.test.ts`.
 
 ## 6. Operator calls and credentials
@@ -157,7 +161,8 @@ or any query of its own runs, and each SQL function it calls refuses again with
 
 `displayName` and `name` are 1–200 characters and not blank; `kind` is `client`
 or `operator`; ids are uuids. A body with an unknown field is 400
-`invalid_request`, as is a malformed id or value. A call with no body (the issue and revoke calls) sends no
+`invalid_request`, as is a malformed id or value, and so is a value of the wrong JSON type: a number, a boolean, `null`
+or an array where a string belongs is refused, never converted to the string it would print as. A call with no body (the issue and revoke calls) sends no
 `Content-Type: application/json`: an empty JSON body is 400 `invalid_request`.
 
 - **A token is shown once.** The server mints it (`cgk_` and 32 random bytes in

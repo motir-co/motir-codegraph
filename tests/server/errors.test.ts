@@ -21,6 +21,12 @@ const throwing: V1Routes = (v1) => {
   v1.get<{ Params: { code: ErrorCode } }>('/throw/:code', (request) => {
     throw new ApiError(request.params.code, `refused with ${request.params.code}`);
   });
+  // A body of every JSON type, echoed as the handler received it.
+  v1.post<{ Body: EchoBody }>(
+    '/echo',
+    { schema: { body: ECHO_SCHEMA } },
+    (request) => request.body,
+  );
   v1.get('/crash', () => {
     throw new Error('secret detail from deep inside');
   });
@@ -30,6 +36,27 @@ const throwing: V1Routes = (v1) => {
     return { reached: true };
   });
 };
+
+interface EchoBody {
+  text: string;
+  count: number;
+  flag: boolean;
+  tags: string[];
+}
+
+const ECHO_SCHEMA = {
+  type: 'object',
+  properties: {
+    text: { type: 'string' },
+    count: { type: 'integer' },
+    flag: { type: 'boolean' },
+    tags: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['text', 'count', 'flag', 'tags'],
+  additionalProperties: false,
+} as const;
+
+const ECHO_VALID: EchoBody = { text: 'seven', count: 7, flag: true, tags: ['a'] };
 
 const DATABASE_ERRORS = {
   invalidText: "SELECT 'not-a-uuid'::uuid",
@@ -82,6 +109,46 @@ describe('the one error body', () => {
 
   it('gives ApiError the status its code maps to', () => {
     expect(new ApiError('tenant_not_found', 'gone').statusCode).toBe(404);
+  });
+});
+
+describe('body validation', () => {
+  const echo = (body: unknown) =>
+    call(server.baseUrl, '/v1/echo', { method: 'POST', token: fx.readerToken, body });
+
+  it('hands the handler a valid body with its types as sent', async () => {
+    const response = await echo(ECHO_VALID);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(ECHO_VALID);
+  });
+
+  // Each value is one a coercing validator would convert to the schema's
+  // type and accept: the app's validator converts nothing.
+  it.each([
+    ['a number for a string', 'text', 7],
+    ['a boolean for a string', 'text', false],
+    ['a one-element array for a string', 'text', ['seven']],
+    ['null for a string', 'text', null],
+    ['a numeric string for an integer', 'count', '7'],
+    ['a boolean for an integer', 'count', true],
+    ['null for an integer', 'count', null],
+    ['a string for a boolean', 'flag', 'true'],
+    ['a number for a boolean', 'flag', 1],
+    ['null for a boolean', 'flag', null],
+    ['a bare string for an array', 'tags', 'a'],
+    ['a number inside an array of strings', 'tags', [7]],
+  ])('refuses %s 400 invalid_request', async (_case, field, value) => {
+    const response = await echo({ ...ECHO_VALID, [field]: value });
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'invalid_request', message: expect.stringContaining(field) as string },
+    });
+  });
+
+  it('refuses a field the schema does not name rather than dropping it', async () => {
+    const response = await echo({ ...ECHO_VALID, extra: 'x' });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ error: { code: 'invalid_request' } });
   });
 });
 
