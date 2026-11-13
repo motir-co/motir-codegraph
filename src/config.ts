@@ -44,7 +44,7 @@ export const DEFAULT_HARD_CEILING = 32;
 export const DEFAULT_STAGED_LAYER_STALENESS_MS = 7_200_000;
 
 /**
- * The three knobs of the commit-layer library (src/indexing/layers): service
+ * The three knobs of the commit-layer library (src/layers): service
  * configuration, read once by the process that hosts the library's calls and
  * handed down. Never per tenant or per repository.
  */
